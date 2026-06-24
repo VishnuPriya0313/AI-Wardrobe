@@ -1,0 +1,9 @@
+{
+  "name": "ai-wardrobe-frontend",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "start": "powershell -NoProfile -ExecutionPolicy Bypass -File ./start-frontend.ps1",
+    "check": "node --check wardrobe-studio.js"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "ai-wardrobe-studio",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "start:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File ./backend/start-spring.ps1",
+    "start:frontend": "powershell -NoProfile -ExecutionPolicy Bypass -File ./frontend/start-frontend.ps1",
+    "check:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File ./backend/start-spring.ps1 test",
+    "check:frontend": "node --check frontend/wardrobe-studio.js"
+  }
+}
