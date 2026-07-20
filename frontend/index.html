@@ -11,16 +11,18 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="wardrobe-studio-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-192.png">
-  <link rel="stylesheet" href="wardrobe-studio.css?v=20260623-r2">
+  <link rel="stylesheet" href="wardrobe-studio.css?v=20260714-auth1">
 </head>
 <body>
 <div id="root"></div>
 <script defer src="vendor/react.production.min.js?v=20260623"></script>
 <script defer src="vendor/react-dom.production.min.js?v=20260623"></script>
 <script>
-  window.AI_WARDROBE_API_URL = "https://ai-wardrobe-backend-kuyu.onrender.com";
+  if (!["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+    window.AI_WARDROBE_API_URL = "https://ai-wardrobe-backend-kuyu.onrender.com";
+  }
 </script>
-<script defer src="wardrobe-studio.js?v=20260623-r2"></script>
+<script defer src="wardrobe-studio.js?v=20260714-auth1"></script>
 <script>
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {

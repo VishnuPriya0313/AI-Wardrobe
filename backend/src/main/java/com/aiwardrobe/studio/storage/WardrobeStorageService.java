@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.UUID;
 
 import com.aiwardrobe.studio.api.dto.WardrobeItemUploadRequest;
 import com.aiwardrobe.studio.api.dto.WardrobeItemUploadResponse;
@@ -44,6 +45,7 @@ public class WardrobeStorageService {
   private static final String METADATA_FILE = "metadata.json";
 
   private final ObjectMapper objectMapper;
+  private final WardrobeItemRepository items;
   private final boolean enabled;
   private final String bucket;
   private final String region;
@@ -53,6 +55,7 @@ public class WardrobeStorageService {
 
   public WardrobeStorageService(
       ObjectMapper objectMapper,
+      WardrobeItemRepository items,
       @Value("${app.s3.enabled}") boolean enabled,
       @Value("${app.s3.bucket}") String bucket,
       @Value("${app.s3.region}") String region,
@@ -60,6 +63,7 @@ public class WardrobeStorageService {
       @Value("${app.s3.public-base-url}") String publicBaseUrl,
       @Value("${app.s3.endpoint:}") String endpoint) {
     this.objectMapper = objectMapper;
+    this.items = items;
     this.enabled = enabled;
     this.bucket = bucket;
     this.region = region;
@@ -68,23 +72,34 @@ public class WardrobeStorageService {
     this.endpoint = endpoint;
   }
 
-  public WardrobeItemUploadResponse storeWardrobeItem(WardrobeItemUploadRequest request) {
+  public WardrobeItemUploadResponse storeWardrobeItem(UUID userId, WardrobeItemUploadRequest request) {
     ensureConfigured();
 
     DataUrlImage image = parseImage(request.image());
-    String itemKey = joinKey(keyPrefix, "items", keySegment(request.id()));
+    String itemKey = joinKey(keyPrefix, "users", userId.toString(), "items", keySegment(request.id()));
     String imageKey = itemKey + "/image." + image.extension();
     String metadataKey = itemKey + "/" + METADATA_FILE;
 
     try (S3Client s3 = s3Client()) {
       putObject(s3, imageKey, image.contentType(), RequestBody.fromBytes(image.bytes()));
-      putObject(s3, metadataKey, "application/json", RequestBody.fromString(metadataJson(request, imageKey, metadataKey)));
+      putObject(s3, metadataKey, "application/json", RequestBody.fromString(metadataJson(userId, request, imageKey, metadataKey)));
+    }
+
+    Instant createdAt;
+    try { createdAt = request.createdAt() == null || request.createdAt().isBlank() ? Instant.now() : Instant.parse(request.createdAt()); }
+    catch (Exception ignored) { createdAt = Instant.now(); }
+    try {
+      items.save(new WardrobeItemEntity(request.id(), userId, valueOrDefault(request.imageFingerprint(), ""),
+          valueOrDefault(request.originalFileName(), ""), request.category(), objectMapper.writeValueAsString(request.analysis()),
+          imageKey, metadataKey, createdAt));
+    } catch (JsonProcessingException error) {
+      throw new IllegalStateException("Could not save wardrobe item metadata.");
     }
 
     return new WardrobeItemUploadResponse(true, bucket, itemKey, imageKey, metadataKey, publicUrl(imageKey));
   }
 
-  public List<Map<String, Object>> listWardrobeItems() {
+  public List<Map<String, Object>> listWardrobeItems(UUID userId) {
     if (!enabled) {
       return List.of();
     }
@@ -92,8 +107,8 @@ public class WardrobeStorageService {
 
     List<Map<String, Object>> items = new ArrayList<>();
     try (S3Client s3 = s3Client()) {
-      for (String metadataKey : metadataKeys(s3)) {
-        readItem(s3, metadataKey).ifPresent(items::add);
+      for (WardrobeItemEntity entity : this.items.findAllByUserIdOrderByCreatedAtDesc(userId)) {
+        readItem(s3, entity).ifPresent(items::add);
       }
     }
 
@@ -101,13 +116,15 @@ public class WardrobeStorageService {
     return items;
   }
 
-  public void deleteWardrobeItem(String itemId) {
+  public void deleteWardrobeItem(UUID userId, String itemId) {
     if (!enabled) {
       return;
     }
     ensureConfigured();
 
-    String itemPrefix = joinKey(keyPrefix, "items", keySegment(itemId)) + "/";
+    WardrobeItemEntity entity = items.findByIdAndUserId(itemId, userId)
+        .orElseThrow(() -> new IllegalArgumentException("Wardrobe item was not found."));
+    String itemPrefix = joinKey(keyPrefix, "users", userId.toString(), "items", keySegment(itemId)) + "/";
     try (S3Client s3 = s3Client()) {
       String token = null;
       do {
@@ -124,6 +141,7 @@ public class WardrobeStorageService {
         token = page.nextContinuationToken();
       } while (token != null);
     }
+    items.delete(entity);
   }
 
   private List<String> metadataKeys(S3Client s3) {
@@ -149,10 +167,9 @@ public class WardrobeStorageService {
     return keys;
   }
 
-  private Optional<Map<String, Object>> readItem(S3Client s3, String metadataKey) {
+  private Optional<Map<String, Object>> readItem(S3Client s3, WardrobeItemEntity entity) {
     try {
-      JsonNode metadata = objectMapper.readTree(getObjectBytes(s3, metadataKey).asString(StandardCharsets.UTF_8));
-      String imageKey = metadata.path("s3").path("imageKey").asText("");
+      String imageKey = entity.getImageKey();
       if (imageKey.isBlank()) {
         return Optional.empty();
       }
@@ -162,14 +179,14 @@ public class WardrobeStorageService {
       String dataUrl = "data:" + contentType + ";base64," + Base64.getEncoder().encodeToString(image.asByteArray());
 
       Map<String, Object> item = new LinkedHashMap<>();
-      item.put("id", metadata.path("id").asText(""));
+      item.put("id", entity.getId());
       item.put("image", dataUrl);
-      item.put("imageFingerprint", metadata.path("imageFingerprint").asText(""));
-      item.put("originalFileName", metadata.path("originalFileName").asText(""));
-      item.put("category", metadata.path("category").asText(""));
-      item.put("createdAt", metadata.path("createdAt").asText(""));
-      item.put("analysis", objectMapper.convertValue(metadata.path("analysis"), Map.class));
-      item.put("cloudStorage", storageInfo(metadataKey, imageKey));
+      item.put("imageFingerprint", entity.getImageFingerprint());
+      item.put("originalFileName", entity.getOriginalFileName());
+      item.put("category", entity.getCategory());
+      item.put("createdAt", entity.getCreatedAt().toString());
+      item.put("analysis", objectMapper.readValue(entity.getAnalysisJson(), Map.class));
+      item.put("cloudStorage", storageInfo(entity.getMetadataKey(), imageKey));
       return Optional.of(item);
     } catch (Exception ignored) {
       return Optional.empty();
@@ -238,10 +255,11 @@ public class WardrobeStorageService {
     }
   }
 
-  private String metadataJson(WardrobeItemUploadRequest request, String imageKey, String metadataKey) {
+  private String metadataJson(UUID userId, WardrobeItemUploadRequest request, String imageKey, String metadataKey) {
     try {
       return objectMapper.writeValueAsString(Map.of(
           "id", request.id(),
+          "userId", userId.toString(),
           "imageFingerprint", valueOrDefault(request.imageFingerprint(), ""),
           "originalFileName", valueOrDefault(request.originalFileName(), ""),
           "category", request.category(),

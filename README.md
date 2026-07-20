@@ -37,6 +37,11 @@ OPENAI_API_KEY=your_key_here
 OPENAI_MODEL=gpt-4.1-mini
 PORT=8080
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
+DATABASE_URL=jdbc:postgresql://127.0.0.1:5432/ai_wardrobe
+DATABASE_USERNAME=postgres
+DATABASE_PASSWORD=your_database_password
+SESSION_COOKIE_SECURE=false
+SESSION_COOKIE_SAME_SITE=lax
 APP_S3_ENABLED=false
 APP_S3_BUCKET=your-wardrobe-bucket
 APP_S3_REGION=us-east-1
@@ -46,6 +51,8 @@ APP_S3_ENDPOINT=
 AWS_ACCESS_KEY_ID=your_aws_access_key
 AWS_SECRET_ACCESS_KEY=your_aws_secret_key
 ```
+
+Create the PostgreSQL database before starting the backend. Flyway creates the user and wardrobe tables automatically. For HTTPS production deployments, set `SESSION_COOKIE_SECURE=true`. Prefer serving the frontend and API from the same site; if they must be cross-site, use `SESSION_COOKIE_SAME_SITE=none` and HTTPS.
 
 Use `AI_PROVIDER=ollama` for local Ollama. `OLLAMA_MODEL` is the vision model for upload recognition, and `OLLAMA_MATCH_MODEL` is the faster text model for matching. Use `AI_PROVIDER=openai` to switch back to OpenAI.
 

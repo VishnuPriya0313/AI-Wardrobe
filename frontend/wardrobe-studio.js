@@ -1,10 +1,18 @@
 (function () {
   const createElement = React.createElement;
-  const WARDROBE_STORAGE_KEY = "ai-wardrobe-studio-items-v2";
   const BACKEND_API_BASE_URL = resolveBackendApiBaseUrl();
   const MAX_ANALYSIS_IMAGE_DIMENSION = 1200;
   const ANALYSIS_IMAGE_QUALITY = 0.86;
   const MAX_MATCH_CANDIDATES = 3;
+  const MAX_SHOPPING_OPTIONS = 5;
+  const FIELD_SUGGESTIONS = {
+    category: ["top", "bottom"],
+    color: ["black", "white", "navy", "blue", "gray", "beige", "brown", "green", "red", "pink", "purple", "yellow", "orange"],
+    material: ["cotton", "linen", "denim", "knit", "ribbed knit", "chiffon", "satin", "leather", "wool", "polyester"],
+    pattern: ["solid", "striped", "floral", "plaid", "checked", "polka dot", "graphic", "lace", "ribbed"],
+    occasion: ["casual", "smart casual", "work", "formal", "party", "lounge", "athletic", "beach"],
+    season: ["spring", "summer", "fall", "winter", "spring/summer", "fall/winter", "all season"]
+  };
 
   const EMPTY_CLOTHING_ANALYSIS = {
     name: "",
@@ -29,7 +37,9 @@
   );
 
   function WardrobeStudioApp() {
-    const [wardrobeItems, setWardrobeItems] = React.useState(loadLocalWardrobeItems);
+    const [wardrobeItems, setWardrobeItems] = React.useState([]);
+    const [currentUser, setCurrentUser] = React.useState(null);
+    const [isCheckingSession, setIsCheckingSession] = React.useState(true);
     const [activeWardrobeFilter, setActiveWardrobeFilter] = React.useState("all");
     const [selectedWardrobeItemId, setSelectedWardrobeItemId] = React.useState("");
     const [selectedImagePreview, setSelectedImagePreview] = React.useState("");
@@ -41,6 +51,12 @@
     const [isRecognizingClothing, setIsRecognizingClothing] = React.useState(false);
     const [isScoringOutfits, setIsScoringOutfits] = React.useState(false);
     const [outfitScoreResults, setOutfitScoreResults] = React.useState([]);
+    const [shoppingOptions, setShoppingOptions] = React.useState([]);
+    const [shoppingStatus, setShoppingStatus] = React.useState({ text: "", tone: "" });
+    const [isSearchingShopping, setIsSearchingShopping] = React.useState(false);
+    const [shoppingTargetType, setShoppingTargetType] = React.useState("");
+    const [isShoppingTypeMenuOpen, setIsShoppingTypeMenuOpen] = React.useState(false);
+    const [activeSuggestionField, setActiveSuggestionField] = React.useState("");
     const [activeAppView, setActiveAppView] = React.useState("wardrobe");
     const [isDarkMode, setIsDarkMode] = React.useState(() => {
       const saved = localStorage.getItem("ai-wardrobe-theme");
@@ -54,6 +70,14 @@
     const [isAppInstallable, setIsAppInstallable] = React.useState(false);
     const [isStandaloneApp, setIsStandaloneApp] = React.useState(false);
     const [isIosInstallHintVisible, setIsIosInstallHintVisible] = React.useState(false);
+
+    React.useEffect(() => {
+      fetch(`${BACKEND_API_BASE_URL}/api/auth/me`, { credentials: "include" })
+        .then(async (response) => response.ok ? response.json() : null)
+        .then((user) => setCurrentUser(user?.authenticated ? user : null))
+        .catch(() => setCurrentUser(null))
+        .finally(() => setIsCheckingSession(false));
+    }, []);
 
     React.useEffect(() => {
       const standaloneQuery = window.matchMedia("(display-mode: standalone)");
@@ -107,6 +131,7 @@
 
     React.useEffect(() => {
       let isCancelled = false;
+      if (!currentUser) return undefined;
       fetchStoredWardrobeItems()
         .then((storedItems) => {
           if (isCancelled) return;
@@ -127,11 +152,7 @@
       return () => {
         isCancelled = true;
       };
-    }, []);
-
-    React.useEffect(() => {
-      saveLocalWardrobeItems(wardrobeItems.filter((item) => !isSampleWardrobeItem(item)));
-    }, [wardrobeItems]);
+    }, [currentUser?.username]);
 
     React.useEffect(() => {
       wardrobeItems
@@ -153,6 +174,10 @@
     const bottomItemCount = wardrobeItems.filter((item) => item.category === "bottom").length;
     React.useEffect(() => {
       setOutfitScoreResults([]);
+      setShoppingOptions([]);
+      setShoppingStatus({ text: "", tone: "" });
+      setShoppingTargetType("");
+      setIsShoppingTypeMenuOpen(false);
       setIsScoringOutfits(false);
     }, [selectedWardrobeItemId]);
 
@@ -324,21 +349,20 @@
       setOutfitScoreResults([]);
 
       try {
-        const scored = await Promise.all(
-          outfitCandidateItems.map((candidate) =>
-            sendJsonToBackend("/api/score-outfit", {
-              selectedImage: selectedWardrobeItem.image,
-              candidateImage: candidate.image,
-              selectedLabel: buildWardrobeItemDescription(selectedWardrobeItem),
-              candidateLabel: buildWardrobeItemDescription(candidate)
-            }).then((scoreResult) => ({
-              candidateId: candidate.id,
-              candidate,
-              score: clampOutfitScore(scoreResult.score),
-              verdict: scoreResult.verdict || ""
-            }))
-          )
-        );
+        const batchResult = await sendJsonToBackend("/api/score-outfits", {
+          selectedLabel: buildWardrobeItemDescription(selectedWardrobeItem),
+          candidates: outfitCandidateItems.map((candidate) => ({
+            id: candidate.id,
+            label: buildWardrobeItemDescription(candidate)
+          }))
+        });
+        const candidateById = new Map(outfitCandidateItems.map((candidate) => [candidate.id, candidate]));
+        const scored = (batchResult.results || []).map((result) => ({
+          candidateId: result.candidateId,
+          candidate: candidateById.get(result.candidateId),
+          score: clampOutfitScore(result.score),
+          verdict: result.verdict || ""
+        })).filter((result) => result.candidate);
 
         const top3 = scored
           .sort((a, b) => b.score - a.score)
@@ -349,6 +373,33 @@
         setAppState({ text: error.message || "AI matching failed.", tone: "error" });
       } finally {
         setIsScoringOutfits(false);
+      }
+    }
+
+    async function findShoppingOptions() {
+      if (!selectedWardrobeItem) return;
+      if (!shoppingTargetType) {
+        setShoppingStatus({ text: "Choose what type of item you want to shop for.", tone: "error" });
+        return;
+      }
+      setIsSearchingShopping(true);
+      setShoppingOptions([]);
+      setShoppingStatus({ text: "Searching stores...", tone: "busy" });
+      try {
+        const options = await sendJsonToBackend("/api/shopping-options", {
+          selectedItem: buildWardrobeItemDescription(selectedWardrobeItem),
+          targetCategory: selectedWardrobeItem.category === "bottom" ? "top" : "bottom",
+          targetType: shoppingTargetType
+        });
+        const visibleOptions = Array.isArray(options) ? options.slice(0, MAX_SHOPPING_OPTIONS) : [];
+        setShoppingOptions(visibleOptions);
+        setShoppingStatus(visibleOptions.length
+          ? { text: `Showing ${visibleOptions.length} online matches.`, tone: "ready" }
+          : { text: "No online products were found. Try another type.", tone: "error" });
+      } catch (error) {
+        setShoppingStatus({ text: error.message || "Online shopping search failed.", tone: "error" });
+      } finally {
+        setIsSearchingShopping(false);
       }
     }
 
@@ -371,7 +422,7 @@
     }
 
     async function deleteStoredWardrobeItem(itemId) {
-      const response = await fetch(`${BACKEND_API_BASE_URL}/api/wardrobe-items/${encodeURIComponent(itemId)}`, { method: "DELETE" });
+      const response = await authenticatedFetch(`${BACKEND_API_BASE_URL}/api/wardrobe-items/${encodeURIComponent(itemId)}`, { method: "DELETE" });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(result.error || result.detail || "Item removed locally, but the R2 copy could not be deleted.");
@@ -379,7 +430,16 @@
       return result;
     }
 
+    async function logout() {
+      await authenticatedFetch(`${BACKEND_API_BASE_URL}/api/auth/logout`, { method: "POST" }).catch(() => {});
+      setWardrobeItems([]);
+      setCurrentUser(null);
+    }
+
     const RANK_LABELS = ["#1 Best Match", "#2 Runner Up", "#3 Also Good"];
+
+    if (isCheckingSession) return createElement("div", { className: "auth-shell" }, createElement("p", null, "Loading your wardrobe..."));
+    if (!currentUser) return createElement(AuthScreen, { onAuthenticated: setCurrentUser });
 
     return createElement("div", { className: "app" },
       createElement("header", { className: "topbar" },
@@ -390,6 +450,7 @@
           )
         ),
         createElement("div", { className: "topbar-actions" },
+          createElement("span", { className: "account-name", title: currentUser.username }, currentUser.username),
           isAppInstallable && !isStandaloneApp
             ? createElement("button", {
                 className: "install-app-button",
@@ -403,7 +464,8 @@
             onClick: () => setIsDarkMode(d => !d),
             title: isDarkMode ? "Switch to light mode" : "Switch to dark mode",
             type: "button"
-          }, isDarkMode ? "Light" : "Dark")
+          }, isDarkMode ? "Light" : "Dark"),
+          createElement("button", { className: "logout-button", onClick: logout, type: "button" }, "Log out")
         )
       ),
       isIosInstallHintVisible
@@ -436,13 +498,13 @@
             uploadState.text ? createElement("p", { className: "status " + uploadState.tone }, uploadState.text) : null,
             createElement("div", { className: "recognition" },
               createElement("div", { className: "data-grid" },
-                renderEditableAnalysisField("Name", "name", recognizedClothingDetails.name, updateRecognizedClothingField),
-                renderEditableAnalysisField("Category", "category", recognizedClothingDetails.category, updateRecognizedClothingField),
-                renderEditableAnalysisField("Color", "color", recognizedClothingDetails.color, updateRecognizedClothingField),
-                renderEditableAnalysisField("Material", "material", recognizedClothingDetails.material, updateRecognizedClothingField),
-                renderEditableAnalysisField("Pattern", "pattern", recognizedClothingDetails.pattern, updateRecognizedClothingField),
-                renderEditableAnalysisField("Occasion", "occasion", recognizedClothingDetails.occasion, updateRecognizedClothingField),
-                renderEditableAnalysisField("Season", "season", recognizedClothingDetails.season, updateRecognizedClothingField)
+                renderEditableAnalysisField("Name", "name", recognizedClothingDetails.name, updateRecognizedClothingField, activeSuggestionField, setActiveSuggestionField),
+                renderEditableAnalysisField("Category", "category", recognizedClothingDetails.category, updateRecognizedClothingField, activeSuggestionField, setActiveSuggestionField),
+                renderEditableAnalysisField("Color", "color", recognizedClothingDetails.color, updateRecognizedClothingField, activeSuggestionField, setActiveSuggestionField),
+                renderEditableAnalysisField("Material", "material", recognizedClothingDetails.material, updateRecognizedClothingField, activeSuggestionField, setActiveSuggestionField),
+                renderEditableAnalysisField("Pattern", "pattern", recognizedClothingDetails.pattern, updateRecognizedClothingField, activeSuggestionField, setActiveSuggestionField),
+                renderEditableAnalysisField("Occasion", "occasion", recognizedClothingDetails.occasion, updateRecognizedClothingField, activeSuggestionField, setActiveSuggestionField),
+                renderEditableAnalysisField("Season", "season", recognizedClothingDetails.season, updateRecognizedClothingField, activeSuggestionField, setActiveSuggestionField)
               )
             ),
             createElement("div", { className: "actions" },
@@ -464,6 +526,36 @@
                 createElement("div", { className: "sample-actions" },
                   createElement("button", { className: "secondary", onClick: loadSampleWardrobeItems, type: "button" }, "Samples"),
                   createElement("button", { className: "danger", onClick: clearWardrobe, type: "button" }, "Clear")
+                )
+                ,
+                createElement("div", { className: "shopping-fallback" },
+                  createElement("p", null, "Not feeling these matches? Shop complementary options online."),
+                  renderShoppingTypeSelector(selectedWardrobeItem, shoppingTargetType, setShoppingTargetType, isShoppingTypeMenuOpen, setIsShoppingTypeMenuOpen),
+                  createElement("button", {
+                    className: "secondary",
+                    type: "button",
+                    onClick: findShoppingOptions,
+                    disabled: isSearchingShopping || !shoppingTargetType
+                  }, isSearchingShopping ? "Searching stores..." : "Shop online"),
+                  shoppingStatus.text ? createElement("p", { className: "status " + shoppingStatus.tone }, shoppingStatus.text) : null,
+                  shoppingOptions.length
+                    ? createElement("div", { className: "shopping-results" }, shoppingOptions.map((option, index) =>
+                        createElement("a", {
+                          className: "shopping-card",
+                          href: option.url,
+                          target: "_blank",
+                          rel: "noopener noreferrer",
+                          key: option.url || index
+                        },
+                          option.image ? createElement("img", { src: option.image, alt: "" }) : null,
+                          createElement("span", null,
+                            createElement("strong", null, option.title),
+                            createElement("small", null, [option.price, option.store].filter(Boolean).join(" · "))
+                          ),
+                          createElement("b", null, "Buy")
+                        )
+                      ))
+                    : null
                 )
               )
             ),
@@ -534,6 +626,35 @@
                       ),
                       createElement("div", { className: "score-number", style: { "--score": result.score } }, `${result.score}%`)
                     )
+                  ),
+                  createElement("div", { className: "shopping-fallback match-shopping-fallback" },
+                    createElement("p", null, "Not feeling these matches? Shop complementary options online."),
+                    renderShoppingTypeSelector(selectedWardrobeItem, shoppingTargetType, setShoppingTargetType, isShoppingTypeMenuOpen, setIsShoppingTypeMenuOpen),
+                    createElement("button", {
+                    className: "secondary",
+                    type: "button",
+                    onClick: findShoppingOptions,
+                    disabled: isSearchingShopping || !shoppingTargetType
+                  }, isSearchingShopping ? "Searching stores..." : "Shop online"),
+                    shoppingStatus.text ? createElement("p", { className: "status " + shoppingStatus.tone }, shoppingStatus.text) : null,
+                    shoppingOptions.length
+                      ? createElement("div", { className: "shopping-results" }, shoppingOptions.map((option, index) =>
+                          createElement("a", {
+                            className: "shopping-card",
+                            href: option.url,
+                            target: "_blank",
+                            rel: "noopener noreferrer",
+                            key: option.url || index
+                          },
+                            option.image ? createElement("img", { src: option.image, alt: "" }) : null,
+                            createElement("span", null,
+                              createElement("strong", null, option.title),
+                              createElement("small", null, [option.price, option.store].filter(Boolean).join(" · "))
+                            ),
+                            createElement("b", null, "Buy")
+                          )
+                        ))
+                      : null
                   )
                 )
               : isScoringOutfits
@@ -553,16 +674,16 @@
   }
 
   function resolveBackendApiBaseUrl() {
+    const pageHostname = window.location.hostname;
+    if (!pageHostname || pageHostname === "localhost" || pageHostname === "127.0.0.1") {
+      return "http://127.0.0.1:8080";
+    }
+
     const configuredUrl = trimText(
       window.AI_WARDROBE_API_URL ||
       localStorage.getItem("ai-wardrobe-api-url")
     );
     if (configuredUrl) return configuredUrl.replace(/\/+$/, "");
-
-    const pageHostname = window.location.hostname;
-    if (!pageHostname || pageHostname === "localhost" || pageHostname === "127.0.0.1") {
-      return "http://127.0.0.1:8080";
-    }
 
     return `http://${pageHostname}:8080`;
   }
@@ -576,13 +697,39 @@
     }, label);
   }
 
-  function renderEditableAnalysisField(label, fieldName, value, onChange, spanFullWidth) {
-    return createElement("label", { className: "field", style: spanFullWidth ? { gridColumn: "1 / -1" } : null },
+  function renderEditableAnalysisField(label, fieldName, value, onChange, activeField, setActiveField) {
+    const suggestions = FIELD_SUGGESTIONS[fieldName] || [];
+    const normalizedValue = trimText(value).toLowerCase();
+    const matchingSuggestions = normalizedValue
+      ? suggestions.filter((suggestion) => suggestion.includes(normalizedValue) && suggestion !== normalizedValue).slice(0, 5)
+      : [];
+    return createElement("label", { className: "field" },
       createElement("span", null, label),
       createElement("input", {
         value: value || "",
-        onChange: (event) => onChange(fieldName, event.target.value)
-      })
+        autoComplete: "off",
+        onFocus: () => setActiveField(fieldName),
+        onBlur: () => setActiveField(""),
+        onChange: (event) => {
+          setActiveField(fieldName);
+          onChange(fieldName, event.target.value);
+        }
+      }),
+      activeField === fieldName && matchingSuggestions.length
+        ? createElement("div", { className: "field-suggestions" },
+            matchingSuggestions.map((suggestion) =>
+              createElement("button", {
+                type: "button",
+                key: suggestion,
+                onMouseDown: (event) => {
+                  event.preventDefault();
+                  onChange(fieldName, suggestion);
+                  setActiveField("");
+                }
+              }, suggestion)
+            )
+          )
+        : null
     );
   }
 
@@ -595,11 +742,61 @@
     }, `${filterLabel} (${count})`);
   }
 
+  function renderShoppingTypeSelector(selectedItem, value, onChange, isOpen, setIsOpen) {
+    if (!selectedItem) return null;
+    const options = selectedItem.category === "bottom"
+      ? [
+          ["", "Choose a top type"],
+          ["blouse", "Blouse"],
+          ["shirt", "Shirt"],
+          ["t-shirt", "T-shirt"],
+          ["any-top", "Any top"]
+        ]
+      : [
+          ["", "Choose a bottom type"],
+          ["pants", "Pants"],
+          ["skirt", "Skirt"],
+          ["shorts", "Shorts"],
+          ["any-bottom", "Any bottom"]
+        ];
+    const selectedOption = options.find(([optionValue]) => optionValue === value);
+    return createElement("div", { className: "shopping-type-field" },
+      createElement("span", null, "What would you like to wear?"),
+      createElement("button", {
+        className: "shopping-type-trigger",
+        type: "button",
+        "aria-expanded": isOpen,
+        onClick: () => setIsOpen(!isOpen)
+      },
+        createElement("span", null, selectedOption ? selectedOption[1] : options[0][1]),
+        createElement("b", null, isOpen ? "▲" : "▼")
+      ),
+      isOpen
+        ? createElement("div", { className: "shopping-type-menu" },
+            options.slice(1).map(([optionValue, label]) =>
+              createElement("button", {
+                className: optionValue === value ? "active" : "",
+                type: "button",
+                key: optionValue,
+                onClick: () => {
+                  onChange(optionValue);
+                  setIsOpen(false);
+                }
+              }, label)
+            )
+          )
+        : null
+    );
+  }
+
   function normalizeClothingAnalysis(result) {
     result = result || {};
-    const normalizedCategory = normalizeCategory(result.category);
+    const normalizedName = trimText(result.name) || "Recognized clothing item";
+    const normalizedCategory = /\b(dress|jumpsuit|romper)\b/i.test(normalizedName)
+      ? "dress"
+      : normalizeCategory(result.category);
     return Object.assign({}, EMPTY_CLOTHING_ANALYSIS, {
-      name: trimText(result.name) || "Recognized clothing item",
+      name: normalizedName,
       color: trimText(result.color || result.primaryColor),
       category: normalizedCategory,
       pattern: trimText(result.pattern),
@@ -611,6 +808,9 @@
 
   function normalizeCategory(value) {
     const category = trimText(value).toLowerCase();
+    if (["dress", "dresses", "jumpsuit", "romper", "one-piece", "one piece"].includes(category)) {
+      return "dress";
+    }
     if (["bottom", "bottoms", "pant", "pants", "jean", "jeans", "trouser", "trousers", "skirt", "short", "shorts"].includes(category)) {
       return "bottom";
     }
@@ -642,25 +842,10 @@
     const analysis = normalizeClothingAnalysis(item.analysis);
     return Object.assign({}, item, {
       analysis,
-      category: trimText(item.category || analysis.category) || "top"
+      category: analysis.category === "dress"
+        ? "dress"
+        : trimText(item.category || analysis.category) || "top"
     });
-  }
-
-  function loadLocalWardrobeItems() {
-    try {
-      const parsedItems = JSON.parse(localStorage.getItem(WARDROBE_STORAGE_KEY) || "[]");
-      return Array.isArray(parsedItems) ? deduplicateWardrobeItems(parsedItems.map(normalizeWardrobeItem)) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  function saveLocalWardrobeItems(items) {
-    try {
-      localStorage.setItem(WARDROBE_STORAGE_KEY, JSON.stringify(deduplicateWardrobeItems(items)));
-    } catch {
-      // Image data URLs can exceed browser storage quota; R2 backup still runs when configured.
-    }
   }
 
   function clampOutfitScore(value) {
@@ -772,7 +957,7 @@
   }
 
   async function sendJsonToBackend(endpointPath, payload) {
-    const response = await fetch(`${BACKEND_API_BASE_URL}${endpointPath}`, {
+    const response = await authenticatedFetch(`${BACKEND_API_BASE_URL}${endpointPath}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -785,12 +970,59 @@
   }
 
   async function fetchStoredWardrobeItems() {
-    const response = await fetch(`${BACKEND_API_BASE_URL}/api/wardrobe-items`);
+    const response = await authenticatedFetch(`${BACKEND_API_BASE_URL}/api/wardrobe-items`);
     const result = await response.json().catch(() => []);
     if (!response.ok) {
       throw new Error(result.error || result.detail || "Could not load wardrobe items from R2.");
     }
     return Array.isArray(result) ? result : [];
+  }
+
+  async function authenticatedFetch(url, options) {
+    options = Object.assign({}, options, { credentials: "include" });
+    const method = String(options.method || "GET").toUpperCase();
+    if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+      const csrfResponse = await fetch(`${BACKEND_API_BASE_URL}/api/auth/csrf`, { credentials: "include" });
+      const csrf = await csrfResponse.json();
+      options.headers = Object.assign({}, options.headers, { "X-XSRF-TOKEN": csrf.token });
+    }
+    const response = await fetch(url, options);
+    if (response.status === 401 && !url.includes("/api/auth/")) window.location.reload();
+    return response;
+  }
+
+  function AuthScreen(props) {
+    const [mode, setMode] = React.useState("login");
+    const [username, setUsername] = React.useState("");
+    const [password, setPassword] = React.useState("");
+    const [status, setStatus] = React.useState("");
+    const [busy, setBusy] = React.useState(false);
+
+    async function submit(event) {
+      event.preventDefault(); setBusy(true); setStatus("");
+      try {
+        const response = await authenticatedFetch(`${BACKEND_API_BASE_URL}/api/auth/${mode}`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.detail || result.error || "Could not sign in.");
+        props.onAuthenticated(result);
+      } catch (error) { setStatus(error.message); } finally { setBusy(false); }
+    }
+
+    return createElement("main", { className: "auth-shell" },
+      createElement("section", { className: "auth-card" },
+        createElement("div", { className: "brand auth-brand" }, createElement("div", { className: "brand-mark" }, "AW"), createElement("h1", null, "AI Wardrobe")),
+        createElement("div", null, createElement("h2", null, mode === "login" ? "Welcome back" : "Create your wardrobe"), createElement("p", null, "Your clothes stay private to your account.")),
+        createElement("form", { onSubmit: submit, className: "auth-form" },
+          createElement("label", null, "Username", createElement("input", { value: username, onChange: (e) => setUsername(e.target.value), autoComplete: "username", minLength: 3, maxLength: 40, required: true, autoCapitalize: "none" })),
+          createElement("label", null, "Password", createElement("input", { type: "password", value: password, onChange: (e) => setPassword(e.target.value), autoComplete: mode === "login" ? "current-password" : "new-password", minLength: 10, maxLength: 128, required: true })),
+          status ? createElement("p", { className: "auth-error", role: "alert" }, status) : null,
+          createElement("button", { className: "primary-button auth-submit", disabled: busy, type: "submit" }, busy ? "Please wait..." : mode === "login" ? "Log in" : "Create account")
+        ),
+        createElement("button", { className: "auth-switch", type: "button", onClick: () => { setMode(mode === "login" ? "register" : "login"); setStatus(""); } }, mode === "login" ? "New here? Create an account" : "Already have an account? Log in")
+      )
+    );
   }
 
   function createSampleWardrobeItemImage(name, category, colorA, colorB) {
