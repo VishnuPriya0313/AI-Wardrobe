@@ -26,6 +26,7 @@ public class BackendCorsConfig implements WebMvcConfigurer {
         .allowedOriginPatterns(allowedOrigins.toArray(String[]::new))
         .allowedMethods("GET", "POST", "DELETE", "OPTIONS")
         .allowedHeaders("*")
+        .allowCredentials(true)
         .maxAge(3600);
   }
 }
