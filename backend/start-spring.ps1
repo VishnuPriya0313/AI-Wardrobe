@@ -60,9 +60,46 @@ function Get-PortListenerProcessId($port) {
   return ""
 }
 
+function Test-DatabaseConnection {
+  $databaseUrl = $env:DATABASE_URL
+  if (!$databaseUrl) {
+    $databaseUrl = "jdbc:postgresql://127.0.0.1:5432/ai_wardrobe"
+  }
+
+  if ($databaseUrl -notmatch '^jdbc:postgresql://(?:127\.0\.0\.1|localhost):(?<port>\d+)/') {
+    return $true
+  }
+
+  $databasePort = [int]$Matches['port']
+  $connection = Test-NetConnection -ComputerName 127.0.0.1 -Port $databasePort -InformationLevel Quiet -WarningAction SilentlyContinue
+  if ($connection) {
+    return $true
+  }
+
+  Write-Host "PostgreSQL is not listening on 127.0.0.1:$databasePort." -ForegroundColor Yellow
+  Write-Host "Attempting to start the project's Docker database..." -ForegroundColor Yellow
+
+  if (!(Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Host "Docker is not installed. Install/start PostgreSQL, or install Docker Desktop." -ForegroundColor Red
+    return $false
+  }
+
+  & docker compose --project-directory $repoDir up -d --wait postgres
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "Could not start PostgreSQL. Start Docker Desktop, then run npm run start:backend again." -ForegroundColor Red
+    return $false
+  }
+
+  return $true
+}
+
 Import-DotEnv
 
 if ($goal -eq "spring-boot:run") {
+  if (!(Test-DatabaseConnection)) {
+    exit 1
+  }
+
   $backendPort = Get-ConfiguredBackendPort
   $listenerProcessId = Get-PortListenerProcessId $backendPort
 
@@ -84,11 +121,13 @@ Push-Location $scriptDir
 try {
   if (Test-Path $localMaven) {
     & $localMaven $goal
-    exit $LASTEXITCODE
+    $mavenExitCode = $LASTEXITCODE
+  } else {
+    & mvn $goal
+    $mavenExitCode = $LASTEXITCODE
   }
-
-  & mvn $goal
-  exit $LASTEXITCODE
 } finally {
   Pop-Location
 }
+
+exit $mavenExitCode

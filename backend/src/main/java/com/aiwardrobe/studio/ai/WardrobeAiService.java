@@ -174,7 +174,17 @@ public class WardrobeAiService {
             Map.of("type", "input_image", "image_url", imageDataUrl))),
         "text", Map.of("format", jsonSchemaFormat("clothing_analysis", clothingAnalysisSchema())));
 
-    return normalizeClothing(parseJson(callOpenAi(body), ClothingAnalysis.class, "OpenAI"));
+    ClothingAnalysis analysis = normalizeClothing(parseJson(callOpenAi(body), ClothingAnalysis.class, "OpenAI"));
+    if (!"dress".equals(analysis.category())) return analysis;
+
+    Map<String, Object> verificationBody = Map.of(
+        "model", openAiModel,
+        "input", List.of(userMessage(
+            Map.of("type", "input_text", "text", dressVerificationPrompt(analysis)),
+            Map.of("type", "input_image", "image_url", imageDataUrl))),
+        "text", Map.of("format", jsonSchemaFormat("clothing_category_verification", clothingAnalysisSchema())));
+    ClothingAnalysis verification = parseJson(callOpenAi(verificationBody), ClothingAnalysis.class, "OpenAI");
+    return applyDressVerification(analysis, verification);
   }
 
   private OutfitScore scoreOutfitWithOpenAi(OutfitScoreRequest request) {
@@ -208,7 +218,15 @@ public class WardrobeAiService {
         clothingAnalysisSchema());
 
     try {
-      return normalizeClothing(parseJson(extractJson(response), ClothingAnalysis.class, "Ollama"));
+      ClothingAnalysis analysis = normalizeClothing(parseJson(extractJson(response), ClothingAnalysis.class, "Ollama"));
+      if (!"dress".equals(analysis.category())) return analysis;
+      String verificationResponse = callOllama(
+          ollamaModel,
+          dressVerificationPrompt(analysis),
+          List.of(base64Payload(imageDataUrl)),
+          clothingAnalysisSchema());
+      ClothingAnalysis verification = parseJson(extractJson(verificationResponse), ClothingAnalysis.class, "Ollama");
+      return applyDressVerification(analysis, verification);
     } catch (IllegalStateException error) {
       return fallbackClothingAnalysis(response);
     }
@@ -278,12 +296,32 @@ public class WardrobeAiService {
         name: product-style name with color, fit, and garment type
         color: specific color name
         category: top, bottom, or dress
-        Use dress for dresses, jumpsuits, rompers, and other one-piece outfits.
+        Classify from the garment's visible construction, not the person wearing it or the generated name.
+        Use top for blouses, shirts, tees, sweaters, jackets, and waist/hip-length peplum garments.
+        Use bottom for pants, trousers, jeans, skirts, and shorts, even when a matching top is visible.
+        Use dress only when one continuous garment visibly covers both the torso and lower body,
+        including genuine dresses, jumpsuits, rompers, and other one-piece outfits.
+        Puff sleeves, a fitted waist, peplum fabric, or a model wearing pants do not make a top a dress.
+        Before returning JSON, verify the garment word in name agrees with category.
         pattern: solid, striped, floral, plaid, checked, polka dot, graphic, lace, ribbed, or unknown
         material: cotton, linen, denim, knit, ribbed knit, chiffon, satin, leather, wool, polyester, or unknown
         occasion: casual, smart casual, work, formal, party, lounge, athletic, or beach
         season: spring, summer, fall, winter, spring/summer, fall/winter, or all season
         """;
+  }
+
+  private String dressVerificationPrompt(ClothingAnalysis firstPass) {
+    return """
+        Audit a previous clothing classification that may have mistaken a short blouse or peplum top for a dress.
+        Look only at the garment construction in the image.
+        A dress must visibly continue from the torso below the hips as one garment and cover the upper legs.
+        A garment ending at the waist or hips is a top, even if it has puff sleeves, a fitted waist, gathers,
+        a flared peplum hem, or is photographed without the model's pants visible.
+        Pants, jeans, trousers, skirts, and shorts are bottoms.
+        Return the full clothing JSON again. Correct both name and category so they agree.
+        Do not keep category=dress unless the garment visibly extends below the hips.
+        Previous result: %s
+        """.formatted(promptText(firstPass.toString()));
   }
 
   private String outfitScorePrompt(OutfitScoreRequest request, boolean includeTrendContext) {
@@ -433,10 +471,22 @@ public class WardrobeAiService {
   private ClothingAnalysis normalizeClothing(ClothingAnalysis analysis) {
     String name = promptText(analysis.name());
     String lowerName = name.toLowerCase();
-    String requestedCategory = String.valueOf(analysis.category()).toLowerCase();
-    String category = containsAny(lowerName, "dress", "jumpsuit", "romper") || "dress".equals(requestedCategory)
-        ? "dress"
-        : "bottom".equals(requestedCategory) ? "bottom" : "top";
+    String requestedCategory = String.valueOf(analysis.category()).trim().toLowerCase();
+    boolean namedBottom = containsAny(lowerName, "pants", "trousers", "jeans", "skirt", "shorts", "palazzo", "culottes");
+    boolean namedTop = containsAny(lowerName, "blouse", "shirt", "t-shirt", "tee", "sweater", "hoodie", "top", "peplum");
+    boolean namedOnePiece = containsAny(lowerName, "dress", "jumpsuit", "romper", "one-piece", "one piece");
+    String category;
+    if (namedBottom) {
+      category = "bottom";
+    } else if (namedTop) {
+      category = "top";
+    } else if (namedOnePiece) {
+      category = "dress";
+    } else if (List.of("top", "bottom", "dress").contains(requestedCategory)) {
+      category = requestedCategory;
+    } else {
+      category = "top";
+    }
     return new ClothingAnalysis(
         name,
         promptText(analysis.color()),
@@ -445,6 +495,25 @@ public class WardrobeAiService {
         promptText(analysis.material()),
         promptText(analysis.occasion()),
         promptText(analysis.season()));
+  }
+
+  private ClothingAnalysis applyDressVerification(ClothingAnalysis firstPass, ClothingAnalysis verification) {
+    String verifiedCategory = String.valueOf(verification.category()).trim().toLowerCase();
+    if (!List.of("top", "bottom", "dress").contains(verifiedCategory)) return firstPass;
+    String verifiedName = promptText(verification.name());
+    if ("top".equals(verifiedCategory)) {
+      verifiedName = verifiedName.replaceAll("(?i)\\bdress\\b", "blouse");
+    } else if ("bottom".equals(verifiedCategory)) {
+      verifiedName = verifiedName.replaceAll("(?i)\\b(jumpsuit|romper|dress)\\b", "pants");
+    }
+    return new ClothingAnalysis(
+        verifiedName,
+        promptText(verification.color()),
+        verifiedCategory,
+        promptText(verification.pattern()),
+        promptText(verification.material()),
+        promptText(verification.occasion()),
+        promptText(verification.season()));
   }
 
   private OutfitScore normalizeScore(OutfitScore score) {

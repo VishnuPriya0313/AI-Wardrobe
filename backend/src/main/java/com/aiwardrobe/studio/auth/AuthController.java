@@ -43,12 +43,21 @@ public class AuthController {
   @ResponseStatus(HttpStatus.CREATED)
   public AuthResponse register(@Valid @RequestBody AuthRequest request, HttpServletRequest httpRequest, HttpServletResponse response) {
     String username = normalize(request.username());
+    String email = request.email() == null ? "" : request.email().trim().toLowerCase(java.util.Locale.ROOT);
+    if (email.isBlank()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Email is required.");
+    if (!request.password().equals(request.confirmPassword())) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Passwords do not match.");
+    if (request.humanLeft() == null || request.humanRight() == null || request.humanAnswer() == null
+        || request.humanLeft() < 1 || request.humanLeft() > 9 || request.humanRight() < 1 || request.humanRight() > 9
+        || request.humanAnswer() != request.humanLeft() + request.humanRight()) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Please answer the human check correctly.");
+    }
     if (users.existsByUsernameIgnoreCase(username)) throw new ResponseStatusException(HttpStatus.CONFLICT, "Username is already taken.");
+    if (users.existsByEmailIgnoreCase(email)) throw new ResponseStatusException(HttpStatus.CONFLICT, "Email is already registered.");
     AppUser user;
     try {
-      user = users.save(new AppUser(UUID.randomUUID(), username, passwordEncoder.encode(request.password()), Instant.now()));
+      user = users.save(new AppUser(UUID.randomUUID(), username, email, passwordEncoder.encode(request.password()), Instant.now()));
     } catch (DataIntegrityViolationException error) {
-      throw new ResponseStatusException(HttpStatus.CONFLICT, "Username is already taken.");
+      throw new ResponseStatusException(HttpStatus.CONFLICT, "Username or email is already registered.");
     }
     authenticate(user, httpRequest, response);
     return new AuthResponse(true, user.getUsername());

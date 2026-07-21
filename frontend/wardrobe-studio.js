@@ -5,6 +5,7 @@
   const ANALYSIS_IMAGE_QUALITY = 0.86;
   const MAX_MATCH_CANDIDATES = 3;
   const MAX_SHOPPING_OPTIONS = 5;
+  const MAX_BULK_UPLOAD_FILES = 20;
   const FIELD_SUGGESTIONS = {
     category: ["top", "bottom"],
     color: ["black", "white", "navy", "blue", "gray", "beige", "brown", "green", "red", "pink", "purple", "yellow", "orange"],
@@ -45,8 +46,10 @@
     const [selectedImagePreview, setSelectedImagePreview] = React.useState("");
     const [selectedImageFingerprint, setSelectedImageFingerprint] = React.useState("");
     const [selectedFileName, setSelectedFileName] = React.useState("");
+    const [editingWardrobeItemId, setEditingWardrobeItemId] = React.useState("");
     const [recognizedClothingDetails, setRecognizedClothingDetails] = React.useState(EMPTY_CLOTHING_ANALYSIS);
     const [uploadState, setUploadState] = React.useState({ text: "", tone: "" });
+    const [bulkUploadState, setBulkUploadState] = React.useState({ active: false, current: 0, total: 0, results: [] });
     const [appState, setAppState] = React.useState({ text: "Ready for outfit analysis.", tone: "ready" });
     const [isRecognizingClothing, setIsRecognizingClothing] = React.useState(false);
     const [isScoringOutfits, setIsScoringOutfits] = React.useState(false);
@@ -172,6 +175,7 @@
     const displayedWardrobeItems = activeWardrobeFilter === "all" ? wardrobeItems : wardrobeItems.filter((item) => item.category === activeWardrobeFilter);
     const topItemCount = wardrobeItems.filter((item) => item.category === "top").length;
     const bottomItemCount = wardrobeItems.filter((item) => item.category === "bottom").length;
+    const dressItemCount = wardrobeItems.filter((item) => item.category === "dress").length;
     React.useEffect(() => {
       setOutfitScoreResults([]);
       setShoppingOptions([]);
@@ -182,7 +186,13 @@
     }, [selectedWardrobeItemId]);
 
     async function handleClothingImageSelected(event) {
-      const selectedFile = event.target.files && event.target.files[0];
+      const selectedFiles = Array.from(event.target.files || []);
+      event.target.value = "";
+      if (selectedFiles.length > 1) {
+        await processBulkClothingImages(selectedFiles);
+        return;
+      }
+      const selectedFile = selectedFiles[0];
       if (!selectedFile) return;
       setIsRecognizingClothing(true);
       setSelectedFileName(selectedFile.name);
@@ -214,8 +224,68 @@
         setUploadState({ text: error.message || "Could not analyze this image.", tone: "error" });
       } finally {
         setIsRecognizingClothing(false);
-        event.target.value = "";
       }
+    }
+
+    async function processBulkClothingImages(selectedFiles) {
+      const files = selectedFiles.slice(0, MAX_BULK_UPLOAD_FILES);
+      const initialResult = files.map((file, index) => ({ label: `Item ${index + 1}`, status: "waiting", message: "Queued" }));
+      setBulkUploadState({ active: true, current: 0, total: files.length, results: initialResult });
+      setIsRecognizingClothing(true);
+      setUploadState({ text: `Preparing ${files.length} images...`, tone: "busy" });
+      const newItems = [];
+
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setBulkUploadState((state) => Object.assign({}, state, {
+          current: index + 1,
+          results: state.results.map((result, resultIndex) => resultIndex === index
+            ? Object.assign({}, result, { status: "processing", message: "AI analyzing..." })
+            : result)
+        }));
+        setUploadState({ text: `Analyzing item ${index + 1} of ${files.length}`, tone: "busy" });
+
+        try {
+          if (!file.type.startsWith("image/")) throw new Error("Not an image file.");
+          const image = await readImageFileAsOptimizedDataUrl(file);
+          const imageFingerprint = await createImageFingerprint(image);
+          const duplicateItem = findDuplicateWardrobeItem(wardrobeItems.concat(newItems), { imageFingerprint, image });
+          if (duplicateItem) {
+            setBulkResult(index, "skipped", `Duplicate of ${duplicateItem.analysis?.name || "saved item"}`);
+            continue;
+          }
+
+          const analysis = normalizeClothingAnalysis(await sendJsonToBackend("/api/analyze-clothing", { image }));
+          if (!analysis.name || !analysis.category) throw new Error("AI could not identify this clothing item.");
+          const wardrobeItem = {
+            id: createWardrobeItemId(), image, imageFingerprint, originalFileName: file.name,
+            analysis, category: analysis.category, createdAt: new Date().toISOString()
+          };
+          newItems.push(wardrobeItem);
+          setWardrobeItems((currentItems) => deduplicateWardrobeItems([wardrobeItem].concat(currentItems)));
+          backupWardrobeItemToR2(wardrobeItem);
+          setBulkResult(index, "saved", `Saved as ${analysis.name}`);
+        } catch (error) {
+          setBulkResult(index, "failed", error.message || "Could not process image.");
+        }
+      }
+
+      const skippedForLimit = selectedFiles.length - files.length;
+      setBulkUploadState((state) => Object.assign({}, state, { active: false, current: files.length }));
+      setIsRecognizingClothing(false);
+      setUploadState({
+        text: `${newItems.length} of ${files.length} items saved.${skippedForLimit ? ` Only the first ${MAX_BULK_UPLOAD_FILES} files were processed.` : ""}`,
+        tone: newItems.length ? "ready" : "error"
+      });
+      if (newItems.length) setAppState({ text: `${newItems.length} bulk-uploaded items saved.`, tone: "ready" });
+    }
+
+    function setBulkResult(index, status, message) {
+      setBulkUploadState((state) => Object.assign({}, state, {
+        results: state.results.map((result, resultIndex) => resultIndex === index
+          ? Object.assign({}, result, { status, message })
+          : result)
+      }));
     }
 
     function cancelSelectedUpload() {
@@ -223,7 +293,21 @@
       setSelectedImageFingerprint("");
       setSelectedFileName("");
       setRecognizedClothingDetails(EMPTY_CLOTHING_ANALYSIS);
+      setEditingWardrobeItemId("");
       setUploadState({ text: "", tone: "" });
+    }
+
+    function editWardrobeItem(item, event) {
+      event.stopPropagation();
+      setEditingWardrobeItemId(item.id);
+      setSelectedImagePreview(item.image);
+      setSelectedImageFingerprint(item.imageFingerprint || "");
+      setSelectedFileName(item.originalFileName || "");
+      setRecognizedClothingDetails(normalizeClothingAnalysis(item.analysis));
+      setUploadState({ text: "", tone: "" });
+      setBulkUploadState({ active: false, current: 0, total: 0, results: [] });
+      setActiveAppView("add");
+      window.scrollTo({ top: 0, behavior: "smooth" });
     }
 
     function updateRecognizedClothingField(fieldName, value) {
@@ -235,7 +319,7 @@
     function saveRecognizedClothingItem() {
       if (!selectedImagePreview || !recognizedClothingDetails.name || !recognizedClothingDetails.category) return;
       const editedClothingDetails = normalizeClothingAnalysis(recognizedClothingDetails);
-      const duplicateItem = findDuplicateWardrobeItem(wardrobeItems, {
+      const duplicateItem = findDuplicateWardrobeItem(wardrobeItems.filter((item) => item.id !== editingWardrobeItemId), {
         imageFingerprint: selectedImageFingerprint,
         image: selectedImagePreview,
         analysis: editedClothingDetails
@@ -247,19 +331,23 @@
         return;
       }
 
-      const wardrobeItem = {
-        id: createWardrobeItemId(),
+      const originalItem = editingWardrobeItemId ? wardrobeItems.find((item) => item.id === editingWardrobeItemId) : null;
+      const wardrobeItem = Object.assign({}, originalItem || {}, {
+        id: editingWardrobeItemId || createWardrobeItemId(),
         image: selectedImagePreview,
         imageFingerprint: selectedImageFingerprint,
         originalFileName: selectedFileName,
         analysis: editedClothingDetails,
         category: editedClothingDetails.category,
-        createdAt: new Date().toISOString()
-      };
-      setWardrobeItems((currentItems) => deduplicateWardrobeItems([wardrobeItem].concat(currentItems)));
+        createdAt: originalItem?.createdAt || new Date().toISOString()
+      });
+      setWardrobeItems((currentItems) => editingWardrobeItemId
+        ? currentItems.map((item) => item.id === editingWardrobeItemId ? wardrobeItem : item)
+        : deduplicateWardrobeItems([wardrobeItem].concat(currentItems)));
+      const wasEditing = Boolean(editingWardrobeItemId);
       cancelSelectedUpload();
-      setAppState({ text: "Item saved locally. Syncing to R2...", tone: "busy" });
-      backupWardrobeItemToR2(wardrobeItem);
+      setAppState({ text: wasEditing ? "Item details updated." : "Item saved locally. Syncing to R2...", tone: wasEditing ? "ready" : "busy" });
+      if (!isSampleWardrobeItem(wardrobeItem)) backupWardrobeItemToR2(wardrobeItem);
     }
 
     function removeWardrobeItem(itemId, event) {
@@ -483,7 +571,7 @@
         createElement("aside", { className: "left-rail" },
           createElement("section", { className: "panel upload-box app-screen add-screen" },
             createElement("div", null,
-              createElement("h2", null, "Add item")
+              createElement("h2", null, editingWardrobeItemId ? "Edit item" : "Add item")
             ),
             selectedImagePreview
               ? createElement("div", { className: "preview" },
@@ -491,12 +579,31 @@
                   createElement("img", { src: selectedImagePreview, alt: "Selected clothing preview" })
                 )
               : createElement("label", { className: "dropzone" },
-                  createElement("input", { type: "file", accept: "image/*", onChange: handleClothingImageSelected }),
-                  createElement("strong", null, "Choose image"),
-                  createElement("span", null, "PNG, JPG, or WEBP clothing photo")
+                  createElement("input", { type: "file", accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: bulkUploadState.active, onChange: handleClothingImageSelected }),
+                  createElement("strong", null, bulkUploadState.active ? "Uploading wardrobe" : "Choose images"),
+                  createElement("span", null, `Select one to review or up to ${MAX_BULK_UPLOAD_FILES} to upload automatically`)
                 ),
             uploadState.text ? createElement("p", { className: "status " + uploadState.tone }, uploadState.text) : null,
-            createElement("div", { className: "recognition" },
+            bulkUploadState.results.length
+              ? createElement("div", { className: "bulk-results", role: "status", "aria-live": "polite" },
+                  createElement("div", { className: "bulk-results-head" },
+                    createElement("span", null,
+                      createElement("strong", null, bulkUploadState.active ? "Uploading wardrobe" : "Upload complete"),
+                      createElement("small", null, `${bulkUploadState.current} of ${bulkUploadState.total} processed`)
+                    ),
+                    !bulkUploadState.active ? createElement("button", { type: "button", className: "auth-switch", onClick: () => setBulkUploadState({ active: false, current: 0, total: 0, results: [] }) }, "Clear") : null
+                  ),
+                  createElement("div", { className: "bulk-progress", "aria-hidden": "true" },
+                    createElement("span", { style: { width: `${bulkUploadState.total ? (bulkUploadState.current / bulkUploadState.total) * 100 : 0}%` } })
+                  ),
+                  createElement("ul", null, bulkUploadState.results.map((result, index) =>
+                    createElement("li", { key: index, className: `bulk-${result.status}` },
+                      createElement("span", { className: "bulk-result-name" }, result.label),
+                      createElement("span", null, result.message))
+                  ))
+                )
+              : null,
+            selectedImagePreview ? createElement("div", { className: "recognition" },
               createElement("div", { className: "data-grid" },
                 renderEditableAnalysisField("Name", "name", recognizedClothingDetails.name, updateRecognizedClothingField, activeSuggestionField, setActiveSuggestionField),
                 renderEditableAnalysisField("Category", "category", recognizedClothingDetails.category, updateRecognizedClothingField, activeSuggestionField, setActiveSuggestionField),
@@ -506,11 +613,11 @@
                 renderEditableAnalysisField("Occasion", "occasion", recognizedClothingDetails.occasion, updateRecognizedClothingField, activeSuggestionField, setActiveSuggestionField),
                 renderEditableAnalysisField("Season", "season", recognizedClothingDetails.season, updateRecognizedClothingField, activeSuggestionField, setActiveSuggestionField)
               )
-            ),
-            createElement("div", { className: "actions" },
-              createElement("button", { className: "primary", onClick: saveRecognizedClothingItem, disabled: isRecognizingClothing || !selectedImagePreview || !recognizedClothingDetails.name, type: "button" }, "Save item"),
+            ) : null,
+            selectedImagePreview ? createElement("div", { className: "actions" },
+              createElement("button", { className: "primary", onClick: saveRecognizedClothingItem, disabled: isRecognizingClothing || !selectedImagePreview || !recognizedClothingDetails.name, type: "button" }, editingWardrobeItemId ? "Save changes" : "Save item"),
               createElement("button", { className: "secondary", onClick: cancelSelectedUpload, disabled: !selectedImagePreview && !recognizedClothingDetails.name, type: "button" }, "Cancel")
-            )
+            ) : null
           ),
         ),
         createElement("section", { className: "main" },
@@ -521,7 +628,8 @@
                 createElement("div", { className: "filters" },
                   renderWardrobeFilterButton("all", activeWardrobeFilter, setActiveWardrobeFilter, wardrobeItems.length),
                   renderWardrobeFilterButton("top", activeWardrobeFilter, setActiveWardrobeFilter, topItemCount),
-                  renderWardrobeFilterButton("bottom", activeWardrobeFilter, setActiveWardrobeFilter, bottomItemCount)
+                  renderWardrobeFilterButton("bottom", activeWardrobeFilter, setActiveWardrobeFilter, bottomItemCount),
+                  renderWardrobeFilterButton("dress", activeWardrobeFilter, setActiveWardrobeFilter, dressItemCount)
                 ),
                 createElement("div", { className: "sample-actions" },
                   createElement("button", { className: "secondary", onClick: loadSampleWardrobeItems, type: "button" }, "Samples"),
@@ -581,6 +689,13 @@
                       title: "Cancel item",
                       onClick: (event) => removeWardrobeItem(item.id, event)
                     }, "x"),
+                    createElement("button", {
+                      className: "icon-button edit-item-icon",
+                      type: "button",
+                      title: `Edit ${item.analysis.name}`,
+                      "aria-label": `Edit ${item.analysis.name}`,
+                      onClick: (event) => editWardrobeItem(item, event)
+                    }, "✎"),
                     createElement("img", { src: item.image, alt: item.analysis.name }),
                     createElement("div", { className: "item-info" },
                       createElement("strong", null, item.analysis.name),
@@ -602,8 +717,14 @@
               createElement("div", null,
                 createElement("h2", null, "Matching")
               ),
-              createElement("button", { className: "primary", onClick: () => analyzeSelectedItemOutfitScores(), disabled: !selectedWardrobeItem || !outfitCandidateItems.length || isScoringOutfits, type: "button" },
-                isScoringOutfits ? "Matching..." : "Match"
+              createElement("span", {
+                className: "match-button-wrap " + (selectedWardrobeItem && !outfitCandidateItems.length ? "show-no-alternatives" : ""),
+                "data-tooltip": selectedWardrobeItem && !outfitCandidateItems.length ? "No alternatives found" : "",
+                tabIndex: selectedWardrobeItem && !outfitCandidateItems.length ? 0 : -1
+              },
+                createElement("button", { className: "primary", onClick: () => analyzeSelectedItemOutfitScores(), disabled: !selectedWardrobeItem || !outfitCandidateItems.length || isScoringOutfits, type: "button" },
+                  isScoringOutfits ? "Matching..." : "Match"
+                )
               )
             ),
             selectedWardrobeItem
@@ -734,7 +855,7 @@
   }
 
   function renderWardrobeFilterButton(filterValue, activeFilter, setActiveFilter, count) {
-    const filterLabel = filterValue === "all" ? "All" : filterValue === "top" ? "Tops" : "Bottoms";
+    const filterLabel = filterValue === "all" ? "All" : filterValue === "top" ? "Tops" : filterValue === "bottom" ? "Bottoms" : "Dresses";
     return createElement("button", {
       type: "button",
       className: activeFilter === filterValue ? "active" : "",
@@ -792,9 +913,7 @@
   function normalizeClothingAnalysis(result) {
     result = result || {};
     const normalizedName = trimText(result.name) || "Recognized clothing item";
-    const normalizedCategory = /\b(dress|jumpsuit|romper)\b/i.test(normalizedName)
-      ? "dress"
-      : normalizeCategory(result.category);
+    const normalizedCategory = normalizeCategory(result.category);
     return Object.assign({}, EMPTY_CLOTHING_ANALYSIS, {
       name: normalizedName,
       color: trimText(result.color || result.primaryColor),
@@ -839,12 +958,13 @@
 
   function normalizeWardrobeItem(item) {
     item = item || {};
-    const analysis = normalizeClothingAnalysis(item.analysis);
+    const rawAnalysis = item.analysis || {};
+    const analysis = normalizeClothingAnalysis(Object.assign({}, rawAnalysis, {
+      category: rawAnalysis.category || item.category
+    }));
     return Object.assign({}, item, {
       analysis,
-      category: analysis.category === "dress"
-        ? "dress"
-        : trimText(item.category || analysis.category) || "top"
+      category: analysis.category
     });
   }
 
@@ -994,15 +1114,22 @@
   function AuthScreen(props) {
     const [mode, setMode] = React.useState("login");
     const [username, setUsername] = React.useState("");
+    const [email, setEmail] = React.useState("");
     const [password, setPassword] = React.useState("");
+    const [confirmPassword, setConfirmPassword] = React.useState("");
+    const [humanAnswer, setHumanAnswer] = React.useState("");
+    const [humanCheck, setHumanCheck] = React.useState(() => ({ left: Math.ceil(Math.random() * 9), right: Math.ceil(Math.random() * 9) }));
     const [status, setStatus] = React.useState("");
     const [busy, setBusy] = React.useState(false);
 
     async function submit(event) {
       event.preventDefault(); setBusy(true); setStatus("");
+      if (mode === "register" && password !== confirmPassword) { setStatus("Passwords do not match."); setBusy(false); return; }
       try {
         const response = await authenticatedFetch(`${BACKEND_API_BASE_URL}/api/auth/${mode}`, {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password })
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(mode === "register"
+            ? { username, email, password, confirmPassword, humanLeft: humanCheck.left, humanRight: humanCheck.right, humanAnswer: Number(humanAnswer) }
+            : { username, password })
         });
         const result = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(result.detail || result.error || "Could not sign in.");
@@ -1016,11 +1143,17 @@
         createElement("div", null, createElement("h2", null, mode === "login" ? "Welcome back" : "Create your wardrobe"), createElement("p", null, "Your clothes stay private to your account.")),
         createElement("form", { onSubmit: submit, className: "auth-form" },
           createElement("label", null, "Username", createElement("input", { value: username, onChange: (e) => setUsername(e.target.value), autoComplete: "username", minLength: 3, maxLength: 40, required: true, autoCapitalize: "none" })),
+          mode === "register" ? createElement("label", null, "Email", createElement("input", { type: "email", value: email, onChange: (e) => setEmail(e.target.value), autoComplete: "email", maxLength: 254, required: true, autoCapitalize: "none" })) : null,
           createElement("label", null, "Password", createElement("input", { type: "password", value: password, onChange: (e) => setPassword(e.target.value), autoComplete: mode === "login" ? "current-password" : "new-password", minLength: 10, maxLength: 128, required: true })),
+          mode === "register" ? createElement("label", null, "Re-enter password", createElement("input", { type: "password", value: confirmPassword, onChange: (e) => setConfirmPassword(e.target.value), autoComplete: "new-password", minLength: 10, maxLength: 128, required: true })) : null,
+          mode === "register" ? createElement("label", { className: "human-check" }, `Human check: What is ${humanCheck.left} + ${humanCheck.right}?`, createElement("input", { type: "number", value: humanAnswer, onChange: (e) => setHumanAnswer(e.target.value), inputMode: "numeric", min: 2, max: 18, required: true })) : null,
           status ? createElement("p", { className: "auth-error", role: "alert" }, status) : null,
           createElement("button", { className: "primary-button auth-submit", disabled: busy, type: "submit" }, busy ? "Please wait..." : mode === "login" ? "Log in" : "Create account")
         ),
-        createElement("button", { className: "auth-switch", type: "button", onClick: () => { setMode(mode === "login" ? "register" : "login"); setStatus(""); } }, mode === "login" ? "New here? Create an account" : "Already have an account? Log in")
+        createElement("button", { className: "auth-switch", type: "button", onClick: () => { const nextMode = mode === "login" ? "register" : "login"; setMode(nextMode); setStatus(""); setConfirmPassword(""); setHumanAnswer(""); setHumanCheck({ left: Math.ceil(Math.random() * 9), right: Math.ceil(Math.random() * 9) }); } }, mode === "login" ? "New here? Create an account" : "Already have an account? Log in"),
+        createElement("div", { className: "auth-divider" }, createElement("span", null, "or")),
+        createElement("button", { className: "google-button", type: "button", onClick: () => setStatus("Google sign-in needs a Google OAuth client ID and secret before it can be enabled.") },
+          createElement("span", { className: "google-mark", "aria-hidden": "true" }, "G"), "Continue with Google")
       )
     );
   }

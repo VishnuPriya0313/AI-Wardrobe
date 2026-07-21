@@ -13,6 +13,15 @@ Start the backend:
 npm run start:backend
 ```
 
+The backend uses PostgreSQL. With Docker Desktop running, this command automatically
+starts the project's database container the first time it is needed. You can also
+manage it explicitly:
+
+```powershell
+npm run start:database
+npm run stop:database
+```
+
 Start the frontend:
 
 ```powershell

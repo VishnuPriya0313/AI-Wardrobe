@@ -3,6 +3,8 @@
   "version": "2.0.0",
   "private": true,
   "scripts": {
+    "start:database": "docker compose up -d --wait postgres",
+    "stop:database": "docker compose stop postgres",
     "start:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File ./backend/start-spring.ps1",
     "start:frontend": "powershell -NoProfile -ExecutionPolicy Bypass -File ./frontend/start-frontend.ps1",
     "check:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File ./backend/start-spring.ps1 test",
