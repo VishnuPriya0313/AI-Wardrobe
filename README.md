@@ -9,7 +9,7 @@ AI Wardrobe Studio is split into two services:
 
 Start the backend:
 
-```powershell
+```shell
 npm run start:backend
 ```
 
@@ -17,14 +17,14 @@ The backend uses PostgreSQL. With Docker Desktop running, this command automatic
 starts the project's database container the first time it is needed. You can also
 manage it explicitly:
 
-```powershell
+```shell
 npm run start:database
 npm run stop:database
 ```
 
 Start the frontend:
 
-```powershell
+```shell
 npm run start:frontend
 ```
 
@@ -51,6 +51,14 @@ DATABASE_USERNAME=postgres
 DATABASE_PASSWORD=your_database_password
 SESSION_COOKIE_SECURE=false
 SESSION_COOKIE_SAME_SITE=lax
+FRONTEND_BASE_URL=http://127.0.0.1:5173
+MAIL_HOST=smtp.gmail.com
+MAIL_PORT=587
+MAIL_USERNAME=your_email@gmail.com
+MAIL_PASSWORD=your_gmail_app_password
+MAIL_FROM=your_email@gmail.com
+GOOGLE_CLIENT_ID=your_google_web_client_id
+GOOGLE_CLIENT_SECRET=your_google_web_client_secret
 APP_S3_ENABLED=false
 APP_S3_BUCKET=your-wardrobe-bucket
 APP_S3_REGION=us-east-1
@@ -63,26 +71,34 @@ AWS_SECRET_ACCESS_KEY=your_aws_secret_key
 
 Create the PostgreSQL database before starting the backend. Flyway creates the user and wardrobe tables automatically. For HTTPS production deployments, set `SESSION_COOKIE_SECURE=true`. Prefer serving the frontend and API from the same site; if they must be cross-site, use `SESSION_COOKIE_SAME_SITE=none` and HTTPS.
 
+New password accounts must verify their email before login. Configure SMTP using the
+`MAIL_*` settings above. Google sign-in is enabled when both Google OAuth values are
+present. Configure the authorized redirect URI as
+`http://127.0.0.1:8080/login/oauth2/code/google` for local development; use the deployed
+backend origin in production.
+
 Use `AI_PROVIDER=ollama` for local Ollama. `OLLAMA_MODEL` is the vision model for upload recognition, and `OLLAMA_MATCH_MODEL` is the faster text model for matching. Use `AI_PROVIDER=openai` to switch back to OpenAI.
 
 ## S3 / R2 Storage
 
-Uploaded wardrobe items are saved in the browser first. When `APP_S3_ENABLED=true`, the backend also stores each user-uploaded item in S3:
+Uploaded wardrobe items remain in memory for the current browser session. When `APP_S3_ENABLED=true`, the backend stores each user-uploaded item in S3 so it can be restored in future sessions:
 
-- Image: `APP_S3_KEY_PREFIX/items/{item-id}/image.{ext}`
-- Metadata JSON: `APP_S3_KEY_PREFIX/items/{item-id}/metadata.json`
+- Image: `APP_S3_KEY_PREFIX/users/{user-id}/items/{item-id}/image.{ext}`
+- Metadata JSON: `APP_S3_KEY_PREFIX/users/{user-id}/items/{item-id}/metadata.json`
 
 For Cloudflare R2, set `APP_S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com` and use `APP_S3_REGION=auto`. For AWS S3, leave `APP_S3_ENDPOINT` blank and set `APP_S3_REGION` to the bucket region.
 
-Keep `APP_S3_PUBLIC_BASE_URL` blank while the bucket is private. The frontend still displays the browser's saved image data; R2/S3 is currently the backup copy. Later, with user accounts, the app can load images from public R2 URLs or backend-generated presigned URLs.
+Keep `APP_S3_PUBLIC_BASE_URL` blank while the bucket is private. The backend reads private objects after login and sends them to the signed-in user's wardrobe; no wardrobe items are persisted in browser storage.
 
-Do not commit real AWS credentials. Use environment variables, `.env`, or your deployment secret manager. The backend uses the AWS default credentials chain, so `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, IAM roles, and local AWS profiles can all work depending on where you run it.
+Do not commit real AWS credentials. Use environment variables, `.env`, or your deployment secret manager. R2 uses `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; AWS IAM roles and local AWS profiles remain available through the default credentials chain when those values are blank.
+
+When the frontend is deployed separately, add all `APP_S3_*`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY` values to the backend service (for example, Render), not to the static frontend host. The R2 token needs Object Read & Write access to `APP_S3_BUCKET`.
 
 ## Ollama Setup
 
 Install Ollama, then pull a vision model:
 
-```powershell
+```shell
 ollama pull llava
 ollama pull llama3.2:3b
 ```
@@ -95,7 +111,10 @@ http://127.0.0.1:11434
 
 ## Checks
 
-```powershell
+```shell
 npm run check:frontend
 npm run check:backend
+npm run check:r2
 ```
+
+`check:r2` writes one tiny diagnostic object, reads it, and removes it immediately.

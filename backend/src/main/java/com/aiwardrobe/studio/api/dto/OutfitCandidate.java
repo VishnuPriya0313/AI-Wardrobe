@@ -4,6 +4,7 @@ import jakarta.validation.constraints.NotBlank;
 
 public record OutfitCandidate(
     @NotBlank String id,
-    @NotBlank String label
+    @NotBlank String label,
+    String image
 ) {
 }

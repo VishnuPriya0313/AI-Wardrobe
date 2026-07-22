@@ -9,6 +9,7 @@ import jakarta.validation.constraints.Size;
 
 public record OutfitBatchRequest(
     @NotBlank String selectedLabel,
+    String selectedImage,
     @NotEmpty @Size(max = 100) List<@Valid OutfitCandidate> candidates
 ) {
 }

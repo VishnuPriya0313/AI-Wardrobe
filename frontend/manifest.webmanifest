@@ -7,9 +7,9 @@
   "id": "./index.html",
   "display": "standalone",
   "display_override": ["standalone", "minimal-ui", "browser"],
-  "orientation": "portrait",
-  "background_color": "#f7f8f5",
-  "theme_color": "#276f72",
+  "orientation": "any",
+  "background_color": "#0f1117",
+  "theme_color": "#14b8a6",
   "icons": [
     {
       "src": "wardrobe-studio-icon.svg",

@@ -35,6 +35,11 @@ public class AiWardrobeStudioApplication {
           }
           String key = trimmed.substring(0, separator).trim();
           String value = trimmed.substring(separator + 1).trim();
+          if (value.length() >= 2
+              && ((value.startsWith("\"") && value.endsWith("\""))
+                  || (value.startsWith("'") && value.endsWith("'")))) {
+            value = value.substring(1, value.length() - 1);
+          }
           if (System.getenv(key) == null && System.getProperty(key) == null) {
             System.setProperty(key, value);
           }

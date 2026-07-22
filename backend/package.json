@@ -3,8 +3,9 @@
   "version": "2.0.0",
   "private": true,
   "scripts": {
-    "start": "powershell -NoProfile -ExecutionPolicy Bypass -File ./start-spring.ps1",
-    "test": "powershell -NoProfile -ExecutionPolicy Bypass -File ./start-spring.ps1 test",
-    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File ./start-spring.ps1 package"
+    "start": "node ../scripts/start-backend.js",
+    "test": "node ../scripts/start-backend.js test",
+    "check:r2": "node ../scripts/start-backend.js -Dtest=R2ConnectivityCheckTest -Dr2.check=true test",
+    "build": "node ../scripts/start-backend.js package"
   }
 }

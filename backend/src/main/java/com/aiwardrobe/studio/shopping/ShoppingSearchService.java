@@ -54,7 +54,9 @@ public class ShoppingSearchService {
 
     List<ScoredShoppingOption> strictOptions = new ArrayList<>();
     List<ScoredShoppingOption> relaxedOptions = new ArrayList<>();
+    int sourceIndex = 0;
     for (JsonNode product : response.path("shopping_results")) {
+      int sourceRank = sourceIndex++;
       String title = product.path("title").asText("Online option");
       String url = product.path("product_link").asText(product.path("link").asText(""));
       if (url.isBlank() || !isStandaloneGarment(title) || !matchesTargetCategory(title, targetCategory)) continue;
@@ -65,7 +67,9 @@ public class ShoppingSearchService {
           product.path("source").asText("Online store"),
           product.path("thumbnail").asText(""),
           url);
-      int score = styleScore(title, targetCategory, targetType, selectedItem);
+      int score = styleScore(title, targetCategory, targetType, selectedItem, query)
+          + Math.max(0, 10 - sourceRank)
+          + liveProductSignalScore(product);
       if (matchesTargetType(title, targetType)) {
         addUniqueScoredOption(strictOptions, new ScoredShoppingOption(option, score));
       } else {
@@ -93,7 +97,7 @@ public class ShoppingSearchService {
     String value = String.valueOf(title).toLowerCase();
     if ("top".equals(targetCategory)) {
       return !containsWord(value, "pant", "pants", "trouser", "trousers", "jean", "jeans",
-          "skirt", "shorts", "palazzo", "dress", "jumpsuit");
+          "skirt", "shorts", "palazzo", "dress", "jumpsuit", "jacket", "cardigan", "coat", "blazer", "vest");
     }
     return !containsWord(value, "blouse", "shirt", "tee", "tshirt", "t-shirt", "sweater",
         "sweatshirt", "bodysuit", "dress", "jumpsuit", "jacket", "cardigan", "coat", "blazer", "vest");
@@ -124,7 +128,7 @@ public class ShoppingSearchService {
         "jumpsuit", "romper", "costume");
   }
 
-  private int styleScore(String title, String targetCategory, String targetType, String selectedItem) {
+  int styleScore(String title, String targetCategory, String targetType, String selectedItem, String query) {
     String value = String.valueOf(title).toLowerCase();
     String selected = String.valueOf(selectedItem).toLowerCase();
     int score = 50;
@@ -136,14 +140,44 @@ public class ShoppingSearchService {
       if (containsWord(value, "cargo", "distressed", "ripped", "embellished", "embroidered", "applique")) score -= 16;
     }
     if ("top".equals(targetCategory)) {
-      if (containsWord(value, "linen", "cotton", "button-down", "button down", "relaxed", "tailored")) score += 8;
-      if (containsWord(value, "embellished", "costume", "sequined")) score -= 16;
+      if (containsWord(value, "linen", "cotton", "button-down", "button down", "tailored",
+          "fitted", "draped", "satin", "silk", "ribbed", "fine-knit", "fine knit", "blouse")) score += 12;
+      if (containsWord(value, "embellished", "costume", "sequined", "cutout", "cut-out", "mesh",
+          "sheer", "distressed", "graphic", "tube", "club", "oversized")) score -= 20;
+    }
+    if ("bottom".equals(targetCategory)) {
+      if (containsWord(value, "tailored", "straight", "pencil", "satin", "silk", "wool", "crepe")) score += 10;
+      if (containsWord(value, "distressed", "ripped", "cargo", "sweatpant", "jogger", "club")) score -= 18;
     }
 
     if (containsAny(selected, "color: blue", " blue")) {
       if (containsWord(value, "white", "ivory", "cream", "beige", "khaki", "tan", "camel", "stone", "ecru")) score += 18;
       if (containsWord(value, "light wash", "medium wash", "blue", "navy", "denim")) score += 5;
       if (containsWord(value, "black", "red", "orange", "purple")) score -= 6;
+    }
+    if (containsAny(selected, "color: beige", "color: ivory", "color: cream", " beige", " ivory", " cream")) {
+      if (containsWord(value, "navy", "indigo", "blue", "denim")) score += 17;
+      else if (containsWord(value, "olive", "sage", "green")) score += 14;
+      else if (containsWord(value, "burgundy", "wine", "chocolate", "brown", "black")) score += 12;
+      else if (containsWord(value, "beige", "ivory", "cream", "khaki", "tan", "stone", "ecru")) score += 3;
+    }
+    if (containsAny(selected, "color: red", "color: crimson", "color: scarlet", "color: burgundy",
+        "color: wine", " red ", " crimson ", " scarlet ", " burgundy ", " wine ")) {
+      if (containsWord(value, "ivory", "cream", "white", "ecru")) score += 22;
+      else if (containsWord(value, "black", "navy")) score += 17;
+      if (containsWord(value, "red", "crimson", "scarlet", "burgundy", "wine", "maroon", "coral", "pink")) score -= 24;
+    }
+    if (containsAny(selected, "peplum", "puff", "ruffle", "ruffled", "oversized", "voluminous", "gathered")) {
+      if (containsWord(value, "high-rise", "high rise", "high-waist", "high waist", "straight",
+          "tapered", "slim", "pencil", "tailored", "cigarette")) score += 18;
+      if (containsWord(value, "wide-leg", "wide leg", "palazzo", "baggy", "balloon", "flared",
+          "pleated", "tiered")) score -= 20;
+    }
+    boolean selectedFullSkirt = containsAny(selected, "skirt")
+        && containsAny(selected, "pleated", "a-line", "a line", "flared", "full", "midi", "mid-length", "maxi", "peplum");
+    if ("top".equals(targetCategory) && selectedFullSkirt) {
+      if (containsWord(value, "fitted", "slim", "ribbed", "bodysuit", "cropped", "crop", "tailored")) score += 16;
+      if (containsWord(value, "oversized", "tunic", "peplum", "puff", "ruffled", "ruffle", "longline", "loose")) score -= 18;
     }
     if (containsAny(selected, "pattern: ribbed", " ribbed")) {
       if (containsWord(value, "solid", "plain", "linen", "cotton", "tailored")) score += 8;
@@ -158,6 +192,47 @@ public class ShoppingSearchService {
       if (containsWord(value, "winter", "fleece", "wool", "thermal")) score -= 10;
     }
 
+    score += queryAlignmentScore(value, String.valueOf(query).toLowerCase());
+
+    return score;
+  }
+
+  private int liveProductSignalScore(JsonNode product) {
+    int score = 0;
+    double rating = product.path("rating").asDouble(0);
+    long reviews = product.path("reviews").asLong(0);
+    if (rating >= 4.5) score += 7;
+    else if (rating >= 4.0) score += 4;
+    else if (rating > 0 && rating < 3.5) score -= 8;
+    if (reviews >= 500) score += 5;
+    else if (reviews >= 100) score += 3;
+    else if (reviews >= 20) score += 1;
+    String condition = product.path("second_hand_condition").asText("");
+    if (!condition.isBlank()) score -= 12;
+    return score;
+  }
+
+  private int queryAlignmentScore(String productTitle, String query) {
+    int score = 0;
+    String[][] preferenceGroups = {
+        {"navy", "indigo"}, {"olive", "sage"}, {"burgundy", "wine"},
+        {"chocolate", "brown"}, {"black"}, {"white", "beige", "ivory", "cream", "ecru"},
+        {"high-rise", "high rise", "high-waist", "high waist"},
+        {"straight", "straight-leg", "straight leg"}, {"tapered", "cigarette"},
+        {"slim", "pencil", "fitted"}, {"tailored", "draped"}, {"linen", "silk", "satin"},
+        {"cotton", "ribbed", "fine-knit", "fine knit"}, {"denim"}
+    };
+    for (int index = 0; index < preferenceGroups.length; index++) {
+      String[] group = preferenceGroups[index];
+      if (containsWord(query, group) && containsWord(productTitle, group)) {
+        score += index < 6 ? 10 : 6;
+      }
+    }
+    boolean queryRequestsCleanLine = containsWord(query, "straight", "straight-leg", "straight leg",
+        "tapered", "slim", "pencil", "tailored", "cigarette");
+    if (queryRequestsCleanLine && containsWord(productTitle, "wide-leg", "wide leg", "palazzo", "baggy", "balloon")) {
+      score -= 14;
+    }
     return score;
   }
 

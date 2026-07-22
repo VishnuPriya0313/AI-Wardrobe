@@ -23,8 +23,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.core.sync.ResponseTransformer;
@@ -43,6 +47,7 @@ public class WardrobeStorageService {
 
   private static final Pattern DATA_URL = Pattern.compile("^data:(image/(?:png|jpeg|jpg|webp));base64,(.+)$");
   private static final String METADATA_FILE = "metadata.json";
+  private static final Logger LOGGER = LoggerFactory.getLogger(WardrobeStorageService.class);
 
   private final ObjectMapper objectMapper;
   private final WardrobeItemRepository items;
@@ -52,6 +57,8 @@ public class WardrobeStorageService {
   private final String keyPrefix;
   private final String publicBaseUrl;
   private final String endpoint;
+  private final String accessKeyId;
+  private final String secretAccessKey;
 
   public WardrobeStorageService(
       ObjectMapper objectMapper,
@@ -61,7 +68,9 @@ public class WardrobeStorageService {
       @Value("${app.s3.region}") String region,
       @Value("${app.s3.key-prefix}") String keyPrefix,
       @Value("${app.s3.public-base-url}") String publicBaseUrl,
-      @Value("${app.s3.endpoint:}") String endpoint) {
+      @Value("${app.s3.endpoint:}") String endpoint,
+      @Value("${app.s3.access-key-id:}") String accessKeyId,
+      @Value("${app.s3.secret-access-key:}") String secretAccessKey) {
     this.objectMapper = objectMapper;
     this.items = items;
     this.enabled = enabled;
@@ -70,6 +79,8 @@ public class WardrobeStorageService {
     this.keyPrefix = keyPrefix;
     this.publicBaseUrl = publicBaseUrl;
     this.endpoint = endpoint;
+    this.accessKeyId = accessKeyId;
+    this.secretAccessKey = secretAccessKey;
   }
 
   public WardrobeItemUploadResponse storeWardrobeItem(UUID userId, WardrobeItemUploadRequest request) {
@@ -83,6 +94,8 @@ public class WardrobeStorageService {
     try (S3Client s3 = s3Client()) {
       putObject(s3, imageKey, image.contentType(), RequestBody.fromBytes(image.bytes()));
       putObject(s3, metadataKey, "application/json", RequestBody.fromString(metadataJson(userId, request, imageKey, metadataKey)));
+    } catch (RuntimeException error) {
+      throw storageError("save the wardrobe item", error);
     }
 
     Instant createdAt;
@@ -100,26 +113,79 @@ public class WardrobeStorageService {
   }
 
   public List<Map<String, Object>> listWardrobeItems(UUID userId) {
-    if (!enabled) {
-      return List.of();
-    }
     ensureConfigured();
 
     List<Map<String, Object>> items = new ArrayList<>();
     try (S3Client s3 = s3Client()) {
+      List<WardrobeItemEntity> indexedItems = this.items.findAllByUserIdOrderByCreatedAtDesc(userId);
+      recoverMissingDatabaseRows(s3, userId, indexedItems);
       for (WardrobeItemEntity entity : this.items.findAllByUserIdOrderByCreatedAtDesc(userId)) {
         readItem(s3, entity).ifPresent(items::add);
       }
+    } catch (IllegalStateException error) {
+      throw error;
+    } catch (RuntimeException error) {
+      throw storageError("load the wardrobe", error);
     }
 
     items.sort(Comparator.comparing((Map<String, Object> item) -> String.valueOf(item.getOrDefault("createdAt", ""))).reversed());
     return items;
   }
 
-  public void deleteWardrobeItem(UUID userId, String itemId) {
-    if (!enabled) {
-      return;
+  private void recoverMissingDatabaseRows(S3Client s3, UUID userId, List<WardrobeItemEntity> indexedItems) {
+    java.util.Set<String> indexedMetadataKeys = indexedItems.stream()
+        .map(WardrobeItemEntity::getMetadataKey)
+        .collect(java.util.stream.Collectors.toSet());
+    java.util.LinkedHashSet<String> candidateKeys = new java.util.LinkedHashSet<>();
+    candidateKeys.addAll(metadataKeysUnderPrefix(s3, joinKey(keyPrefix, "users", userId.toString(), "items") + "/"));
+    // Supports objects created by the earlier non-user-folder layout.
+    candidateKeys.addAll(metadataKeysUnderPrefix(s3, joinKey(keyPrefix, "items") + "/"));
+
+    for (String metadataKey : candidateKeys) {
+      if (indexedMetadataKeys.contains(metadataKey)) continue;
+      recoverDatabaseRow(s3, userId, metadataKey).ifPresent(entity -> {
+        this.items.save(entity);
+        indexedMetadataKeys.add(metadataKey);
+      });
     }
+  }
+
+  private List<String> metadataKeysUnderPrefix(S3Client s3, String objectsPrefix) {
+    List<String> keys = new ArrayList<>();
+    String token = null;
+    do {
+      String pageToken = token;
+      ListObjectsV2Response page = s3.listObjectsV2(builder -> {
+        builder.bucket(bucket).prefix(objectsPrefix);
+        if (pageToken != null) builder.continuationToken(pageToken);
+      });
+      page.contents().stream().map(S3Object::key)
+          .filter(key -> key.endsWith("/" + METADATA_FILE)).forEach(keys::add);
+      token = page.nextContinuationToken();
+    } while (token != null);
+    return keys;
+  }
+
+  private Optional<WardrobeItemEntity> recoverDatabaseRow(S3Client s3, UUID expectedUserId, String metadataKey) {
+    try {
+      JsonNode metadata = objectMapper.readTree(getObjectBytes(s3, metadataKey).asByteArray());
+      if (!expectedUserId.toString().equals(metadata.path("userId").asText())) return Optional.empty();
+      String id = metadata.path("id").asText("");
+      String category = metadata.path("category").asText("");
+      String imageKey = metadata.path("s3").path("imageKey").asText("");
+      if (id.isBlank() || category.isBlank() || imageKey.isBlank()) return Optional.empty();
+      Instant createdAt;
+      try { createdAt = Instant.parse(metadata.path("createdAt").asText()); }
+      catch (Exception ignored) { createdAt = Instant.now(); }
+      return Optional.of(new WardrobeItemEntity(id, expectedUserId,
+          metadata.path("imageFingerprint").asText(""), metadata.path("originalFileName").asText(""),
+          category, objectMapper.writeValueAsString(metadata.path("analysis")), imageKey, metadataKey, createdAt));
+    } catch (Exception ignored) {
+      return Optional.empty();
+    }
+  }
+
+  public void deleteWardrobeItem(UUID userId, String itemId) {
     ensureConfigured();
 
     WardrobeItemEntity entity = items.findByIdAndUserId(itemId, userId)
@@ -140,31 +206,30 @@ public class WardrobeStorageService {
         }
         token = page.nextContinuationToken();
       } while (token != null);
+    } catch (RuntimeException error) {
+      throw storageError("delete the wardrobe item", error);
     }
     items.delete(entity);
   }
 
-  private List<String> metadataKeys(S3Client s3) {
-    List<String> keys = new ArrayList<>();
-    String token = null;
-    String itemsPrefix = joinKey(keyPrefix, "items") + "/";
+  public void deleteAllForUser(UUID userId) {
+    if (!enabled) {
+      return;
+    }
+    ensureConfigured();
 
-    do {
-      String pageToken = token;
-      ListObjectsV2Response page = s3.listObjectsV2(builder -> {
-        builder.bucket(bucket).prefix(itemsPrefix);
-        if (pageToken != null) {
-          builder.continuationToken(pageToken);
-        }
-      });
-      page.contents().stream()
-          .map(S3Object::key)
-          .filter(key -> key.endsWith("/" + METADATA_FILE))
-          .forEach(keys::add);
-      token = page.nextContinuationToken();
-    } while (token != null);
-
-    return keys;
+    List<WardrobeItemEntity> storedItems = items.findAllByUserIdOrderByCreatedAtDesc(userId);
+    if (storedItems.isEmpty()) {
+      return;
+    }
+    try (S3Client s3 = s3Client()) {
+      for (WardrobeItemEntity item : storedItems) {
+        s3.deleteObject(builder -> builder.bucket(bucket).key(item.getImageKey()));
+        s3.deleteObject(builder -> builder.bucket(bucket).key(item.getMetadataKey()));
+      }
+    } catch (RuntimeException error) {
+      throw storageError("delete the account's wardrobe", error);
+    }
   }
 
   private Optional<Map<String, Object>> readItem(S3Client s3, WardrobeItemEntity entity) {
@@ -188,8 +253,8 @@ public class WardrobeStorageService {
       item.put("analysis", objectMapper.readValue(entity.getAnalysisJson(), Map.class));
       item.put("cloudStorage", storageInfo(entity.getMetadataKey(), imageKey));
       return Optional.of(item);
-    } catch (Exception ignored) {
-      return Optional.empty();
+    } catch (Exception error) {
+      throw storageError("load a wardrobe item", error);
     }
   }
 
@@ -218,8 +283,13 @@ public class WardrobeStorageService {
 
   private S3Client s3Client() {
     S3ClientBuilder builder = S3Client.builder()
-        .region(Region.of(region))
-        .credentialsProvider(DefaultCredentialsProvider.create());
+        .region(Region.of(region));
+
+    if (accessKeyId != null && !accessKeyId.isBlank() && secretAccessKey != null && !secretAccessKey.isBlank()) {
+      builder.credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accessKeyId, secretAccessKey)));
+    } else {
+      builder.credentialsProvider(DefaultCredentialsProvider.create());
+    }
 
     if (endpoint != null && !endpoint.isBlank()) {
       builder.endpointOverride(URI.create(endpoint))
@@ -239,6 +309,18 @@ public class WardrobeStorageService {
     if (region == null || region.isBlank()) {
       throw new IllegalStateException("APP_S3_REGION is missing.");
     }
+    if ((accessKeyId == null || accessKeyId.isBlank()) != (secretAccessKey == null || secretAccessKey.isBlank())) {
+      throw new IllegalStateException("Both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required for R2 storage.");
+    }
+    if (endpoint != null && endpoint.contains(".r2.cloudflarestorage.com")
+        && (accessKeyId == null || accessKeyId.isBlank())) {
+      throw new IllegalStateException("R2 credentials are missing. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.");
+    }
+  }
+
+  private IllegalStateException storageError(String action, Exception error) {
+    LOGGER.error("Cloud storage could not {}.", action, error);
+    return new IllegalStateException("Cloud storage could not " + action + ". Check the R2 configuration and try again.");
   }
 
   private DataUrlImage parseImage(String imageDataUrl) {
