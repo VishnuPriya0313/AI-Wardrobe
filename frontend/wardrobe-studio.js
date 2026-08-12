@@ -1,8 +1,8 @@
 (function () {
   const createElement = React.createElement;
   const BACKEND_API_BASE_URL = resolveBackendApiBaseUrl();
-  const MAX_ANALYSIS_IMAGE_DIMENSION = 1200;
-  const ANALYSIS_IMAGE_QUALITY = 0.86;
+  const MAX_ANALYSIS_IMAGE_DIMENSION = 768;
+  const ANALYSIS_IMAGE_QUALITY = 0.8;
   const MAX_MATCH_CANDIDATES = 3;
   const MAX_VISUAL_MATCH_FINALISTS = 6;
   const MAX_SHOPPING_OPTIONS = 5;
@@ -525,62 +525,32 @@
       setOutfitScoreResults([]);
 
       try {
-        const batchResult = await sendJsonToBackend("/api/score-outfits", {
+        const finalists = shortlistOutfitCandidates(selectedWardrobeItem, outfitCandidateItems)
+          .slice(0, MAX_VISUAL_MATCH_FINALISTS);
+        setAppState({ text: "Visually comparing the strongest outfit options...", tone: "busy" });
+        const visualBatchResult = await sendJsonToBackend("/api/score-outfits", {
           selectedLabel: buildWardrobeItemDescription(selectedWardrobeItem),
-          candidates: outfitCandidateItems.map((candidate) => ({
+          selectedImage: selectedWardrobeItem.image,
+          candidates: finalists.map((candidate) => ({
             id: candidate.id,
-            label: buildWardrobeItemDescription(candidate)
+            label: buildWardrobeItemDescription(candidate),
+            image: candidate.image
           }))
         });
-        const candidateById = new Map(outfitCandidateItems.map((candidate) => [candidate.id, candidate]));
-        const scored = (batchResult.results || []).map((result) => ({
-          candidateId: result.candidateId,
-          candidate: candidateById.get(result.candidateId),
-          score: clampOutfitScore(result.score),
-          verdict: result.verdict || ""
-        })).filter((result) => result.candidate);
-
-        const finalists = scored
-          .sort((a, b) => b.score - a.score)
-          .slice(0, MAX_VISUAL_MATCH_FINALISTS);
-        setAppState({ text: "Visually refining the strongest outfit options...", tone: "busy" });
-        let visuallyScored = finalists;
-        let visualRefinementSucceeded = false;
-        try {
-          const visualBatchResult = await sendJsonToBackend("/api/score-outfits", {
-            selectedLabel: buildWardrobeItemDescription(selectedWardrobeItem),
-            selectedImage: selectedWardrobeItem.image,
-            candidates: finalists.map((preliminaryResult) => ({
-              id: preliminaryResult.candidateId,
-              label: buildWardrobeItemDescription(preliminaryResult.candidate),
-              image: preliminaryResult.candidate.image
-            }))
-          });
-          const visualById = new Map((visualBatchResult.results || []).map((result) => [result.candidateId, result]));
-          visuallyScored = finalists.map((preliminaryResult) => {
-            const visualResult = visualById.get(preliminaryResult.candidateId);
-            if (!visualResult) return preliminaryResult;
-            return Object.assign({}, preliminaryResult, {
-              score: clampOutfitScore(visualResult.score),
-              verdict: visualResult.verdict || preliminaryResult.verdict
-            });
-          });
-          visualRefinementSucceeded = visualById.size > 0;
-        } catch (error) {
-          visuallyScored = finalists;
-        }
-
-        const top3 = visuallyScored
+        const candidateById = new Map(finalists.map((candidate) => [candidate.id, candidate]));
+        const top3 = (visualBatchResult.results || [])
+          .map((result) => ({
+            candidateId: result.candidateId,
+            candidate: candidateById.get(result.candidateId),
+            score: clampOutfitScore(result.score),
+            verdict: result.verdict || ""
+          }))
+          .filter((result) => result.candidate)
           .sort((a, b) => b.score - a.score)
           .slice(0, MAX_MATCH_CANDIDATES);
 
         setOutfitScoreResults(top3);
-        setAppState({
-          text: visualRefinementSucceeded
-            ? "Best visually refined matches ready."
-            : "Matches ready from clothing details; visual refinement was unavailable.",
-          tone: "ready"
-        });
+        setAppState({ text: "Best visually refined matches ready.", tone: "ready" });
       } catch (error) {
         setAppState({ text: error.message || "AI matching failed.", tone: "error" });
       } finally {
@@ -1263,6 +1233,31 @@
       `occasion: ${details.occasion}`,
       `season: ${details.season}`
     ].filter(Boolean).join("; ");
+  }
+
+  function shortlistOutfitCandidates(selectedItem, candidates) {
+    const selected = selectedItem.analysis || {};
+    return candidates.slice().sort((first, second) =>
+      outfitShortlistScore(selected, second.analysis || {}) - outfitShortlistScore(selected, first.analysis || {}));
+  }
+
+  function outfitShortlistScore(selected, candidate) {
+    const selectedText = Object.values(selected).join(" ").toLowerCase();
+    const candidateText = Object.values(candidate).join(" ").toLowerCase();
+    let score = 50;
+    const polishedTerms = ["tailored", "fitted", "straight", "pencil", "blouse", "satin", "silk", "linen", "ribbed"];
+    const casualPenaltyTerms = ["cutout", "mesh", "sheer", "distressed", "graphic", "athletic", "lounge", "tube"];
+    if (selected.occasion && selected.occasion === candidate.occasion) score += 12;
+    if ([selected.occasion, candidate.occasion].every((value) => ["smart casual", "work", "formal"].includes(value))) score += 8;
+    if (selected.season === "all season" || candidate.season === "all season" || selected.season === candidate.season) score += 6;
+    if (selected.pattern && selected.pattern !== "solid" && candidate.pattern === "solid") score += 8;
+    if (polishedTerms.some((term) => candidateText.includes(term))) score += 8;
+    if (casualPenaltyTerms.some((term) => candidateText.includes(term))) score -= 18;
+    if (["peplum", "puff", "ruffle", "oversized", "voluminous"].some((term) => selectedText.includes(term))) {
+      if (["straight", "tapered", "slim", "pencil", "tailored"].some((term) => candidateText.includes(term))) score += 12;
+      if (["wide-leg", "palazzo", "baggy", "balloon"].some((term) => candidateText.includes(term))) score -= 14;
+    }
+    return score;
   }
 
   function normalizeWardrobeItem(item) {

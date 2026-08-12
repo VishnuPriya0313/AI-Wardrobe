@@ -78,6 +78,14 @@ class WardrobeAiServiceTest {
   }
 
   @Test
+  void buildsShoppingQueryWithoutCallingAi() {
+    String selected = "red pleated midi skirt; category: bottom; color: red; occasion: casual";
+
+    assertThat(service.createShoppingQuery(selected, "top", "blouse"))
+        .isEqualTo("women's ivory fitted cotton blouse");
+  }
+
+  @Test
   void favorsPolishedBlouseOverCutoutTank() {
     String selected = "red pleated midi skirt; category: bottom; color: red; pattern: solid; "
         + "material: polyester; occasion: casual; season: all season";

@@ -83,9 +83,9 @@ public class WardrobeAiService {
   public OutfitBatchResponse scoreOutfits(OutfitBatchRequest request) {
     boolean visualBatch = isVisualBatchRequest(request);
     String prompt = visualBatch ? outfitVisualBatchPrompt(request) : outfitBatchPrompt(request);
-    int maxOutputTokens = Math.min(4096, 160 + request.candidates().size() * 120);
+    int maxOutputTokens = Math.min(640, 120 + request.candidates().size() * 70);
     String response = switch (providerName()) {
-      case "openai" -> scoreOutfitsWithOpenAi(request, prompt, visualBatch);
+      case "openai" -> scoreOutfitsWithOpenAi(request, prompt, visualBatch, maxOutputTokens);
       case "ollama" -> callOllama(
           visualBatch ? ollamaModel : ollamaMatchModel,
           prompt,
@@ -99,68 +99,26 @@ public class WardrobeAiService {
   }
 
   public String createShoppingQuery(String selectedItem, String targetCategory, String targetType) {
-    String requiredGarment = switch (targetType) {
-      case "any-top" -> "women's top, blouse, or shirt";
-      case "any-bottom" -> "women's pants, skirt, or shorts";
-      case "t-shirt" -> "women's t-shirt";
-      default -> "women's " + targetType;
+    String selected = String.valueOf(selectedItem).toLowerCase();
+    String garment = switch (targetType) {
+      case "any-top" -> "blouse";
+      case "any-bottom" -> "pants";
+      default -> targetType;
     };
-    String prompt = """
-        Act as a fashion stylist and create one focused Google Shopping query for the single best
-        complementary garment to wear with the selected wardrobe item. Base the decision on garment
-        type, exact color, silhouette/proportions, pattern, material, occasion, and season.
-        Default to a polished, elegant, smart-casual-to-formal outfit that looks intentional and refined.
-        Favor clean tailoring, fitted or softly draped shapes, fine knits, satin/silk, and crisp cotton or linen.
-        Avoid clubwear, cutouts, sheer panels, distressed details, slogans, athletic pieces, and shapeless basics.
-        The required shopping category is: %s.
-        Choose exactly one primary color family, one silhouette, and at most one useful material.
-        Do not return alternatives, color lists, slashes, commas, or the word "or".
-        For a peplum, puff-sleeve, ruffled, oversized, or otherwise voluminous top, prefer a high-rise
-        straight, tapered, slim, or tailored bottom that defines the waist. Avoid wide-leg, palazzo,
-        baggy, balloon, heavily pleated, or equally voluminous bottoms.
-        For beige, ivory, or cream tops, prefer deliberate contrast such as navy/deep indigo, olive,
-        burgundy, chocolate, or black over a nearly identical beige unless monochrome is clearly best.
-        For a red, crimson, burgundy, or wine skirt/bottom, default to an ivory, cream, white, black,
-        or navy top. Do not choose a red-family or pink top unless the user explicitly requests monochrome.
-        For a pleated, A-line, flared, full, midi, or maxi skirt, prefer a fitted, slim, ribbed, cropped,
-        or bodysuit-style top that defines the waist. Avoid oversized, tunic, peplum, puff-sleeve,
-        heavily ruffled, or longline tops that compete with the skirt's volume.
-        If the selected item is patterned or textured, prefer a clean solid companion.
-        Prefer wearable standalone garments over novelty, embellished, costume, or statement pieces.
-        For casual spring or summer outfits, favor breathable fabrics and polished everyday shapes.
-        Never recommend the same garment category as the selected item.
-        Recommend one standalone garment only. Do not search for suits, matching sets,
-        coordinated outfits, jumpsuits, dresses, jackets, cardigans, costumes, or multi-piece products.
-        The query must be 5 to 10 shopping keywords, not a sentence, and must include the chosen color,
-        silhouette, and required garment type. Do not repeat the selected garment's descriptive words
-        unless they are necessary to describe the complementary item.
-        Return only structured JSON containing the query.
-        Selected wardrobe item: %s
-        """.formatted(requiredGarment, promptText(selectedItem));
-
-    String response = switch (providerName()) {
-      case "openai" -> {
-        ensureOpenAiConfigured();
-        Map<String, Object> body = Map.of(
-            "model", openAiModel,
-            "input", List.of(userMessage(Map.of("type", "input_text", "text", prompt))),
-            "text", Map.of("format", jsonSchemaFormat("shopping_query", shoppingQuerySchema())));
-        yield callOpenAi(body);
-      }
-      case "ollama" -> callOllama(ollamaMatchModel, prompt, List.of(), shoppingQuerySchema(), 160);
-      default -> throw new IllegalStateException("Unsupported AI_PROVIDER: " + aiProvider);
-    };
-
-    try {
-      String query = objectMapper.readTree(extractJson(response)).path("query").asText("").trim();
-      if (query.isBlank()) throw new IllegalStateException("AI returned an empty shopping query.");
-      query = removeWrongGarmentTerms(query, targetCategory);
-      query = removeShoppingProductNoise(query);
-      query = applyShoppingContrastRules(query, selectedItem, targetCategory);
-      return requiredGarment + " " + query;
-    } catch (JsonProcessingException error) {
-      throw new IllegalStateException("AI returned an invalid shopping query.");
-    }
+    String color = containsAny(selected, "color: red", "color: crimson", "color: burgundy", "color: wine")
+        && "top".equals(targetCategory) ? "ivory"
+        : containsAny(selected, "color: beige", "color: ivory", "color: cream") ? "navy"
+        : containsAny(selected, "color: blue", "color: navy") ? "ivory"
+        : containsAny(selected, "color: black") ? "ivory"
+        : "black";
+    boolean selectedHasVolume = containsAny(selected, "peplum", "puff", "ruffle", "oversized", "voluminous");
+    boolean selectedFullSkirt = containsAny(selected, "skirt")
+        && containsAny(selected, "pleated", "a-line", "flared", "full", "midi", "maxi");
+    String silhouette = "bottom".equals(targetCategory)
+        ? (selectedHasVolume ? "high-rise straight" : "tailored straight")
+        : (selectedFullSkirt ? "fitted" : "tailored");
+    String material = "top".equals(targetCategory) ? "cotton" : "woven";
+    return "women's " + color + " " + silhouette + " " + material + " " + garment;
   }
 
   private String removeWrongGarmentTerms(String query, String targetCategory) {
@@ -213,21 +171,10 @@ public class WardrobeAiService {
         "input", List.of(userMessage(
             Map.of("type", "input_text", "text", clothingAnalysisPrompt()),
             Map.of("type", "input_image", "image_url", imageDataUrl))),
+        "max_output_tokens", 160,
         "text", Map.of("format", jsonSchemaFormat("clothing_analysis", clothingAnalysisSchema())));
 
-    ClothingAnalysis analysis = normalizeClothing(parseJson(callOpenAi(body), ClothingAnalysis.class, "OpenAI"));
-    try {
-      Map<String, Object> verificationBody = Map.of(
-          "model", openAiModel,
-          "input", List.of(userMessage(
-              Map.of("type", "input_text", "text", clothingVerificationPrompt(analysis)),
-              Map.of("type", "input_image", "image_url", imageDataUrl))),
-          "text", Map.of("format", jsonSchemaFormat("clothing_analysis_verification", clothingAnalysisSchema())));
-      ClothingAnalysis verification = parseJson(callOpenAi(verificationBody), ClothingAnalysis.class, "OpenAI");
-      return normalizeClothing(verification);
-    } catch (IllegalStateException error) {
-      return analysis;
-    }
+    return normalizeClothing(parseJson(callOpenAi(body), ClothingAnalysis.class, "OpenAI"));
   }
 
   private OutfitScore scoreOutfitWithOpenAi(OutfitScoreRequest request) {
@@ -243,7 +190,11 @@ public class WardrobeAiService {
     return normalizeScore(parseJson(callOpenAi(body), OutfitScore.class, "OpenAI"));
   }
 
-  private String scoreOutfitsWithOpenAi(OutfitBatchRequest request, String prompt, boolean visualBatch) {
+  private String scoreOutfitsWithOpenAi(
+      OutfitBatchRequest request,
+      String prompt,
+      boolean visualBatch,
+      int maxOutputTokens) {
     ensureOpenAiConfigured();
     List<Map<String, Object>> content = new ArrayList<>();
     content.add(Map.of("type", "input_text", "text", prompt));
@@ -258,6 +209,7 @@ public class WardrobeAiService {
     Map<String, Object> body = Map.of(
         "model", openAiModel,
         "input", List.of(Map.of("role", "user", "content", content)),
+        "max_output_tokens", maxOutputTokens,
         "text", Map.of("format", jsonSchemaFormat("outfit_scores", outfitBatchSchema())));
     return callOpenAi(body);
   }
@@ -269,22 +221,10 @@ public class WardrobeAiService {
         List.of(base64Payload(imageDataUrl)),
         clothingAnalysisSchema());
 
-    ClothingAnalysis analysis;
     try {
-      analysis = normalizeClothing(parseJson(extractJson(response), ClothingAnalysis.class, "Ollama"));
+      return normalizeClothing(parseJson(extractJson(response), ClothingAnalysis.class, "Ollama"));
     } catch (IllegalStateException error) {
       return fallbackClothingAnalysis(response);
-    }
-    try {
-      String verificationResponse = callOllama(
-          ollamaModel,
-          clothingVerificationPrompt(analysis),
-          List.of(base64Payload(imageDataUrl)),
-          clothingAnalysisSchema());
-      ClothingAnalysis verification = parseJson(extractJson(verificationResponse), ClothingAnalysis.class, "Ollama");
-      return normalizeClothing(verification);
-    } catch (IllegalStateException error) {
-      return analysis;
     }
   }
 
