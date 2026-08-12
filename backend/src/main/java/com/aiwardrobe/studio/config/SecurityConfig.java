@@ -22,9 +22,14 @@ public class SecurityConfig {
   SecurityFilterChain securityFilterChain(HttpSecurity http,
       ObjectProvider<ClientRegistrationRepository> registrations,
       GoogleOAuthSuccessHandler googleSuccessHandler,
-      @Value("${app.frontend-base-url}") String frontendBaseUrl) throws Exception {
+                                          @Value("${app.frontend-base-url}") String frontendBaseUrl,
+                                          @Value("${server.servlet.session.cookie.secure}") boolean secureCookies,
+                                          @Value("${server.servlet.session.cookie.same-site}") String sameSite) throws Exception {
     CookieCsrfTokenRepository csrfRepository = CookieCsrfTokenRepository.withHttpOnlyFalse();
     csrfRepository.setCookiePath("/");
+    csrfRepository.setCookieCustomizer(cookie -> cookie
+              .secure(secureCookies)
+              .sameSite(sameSite));
     CsrfTokenRequestAttributeHandler csrfHandler = new CsrfTokenRequestAttributeHandler();
     csrfHandler.setCsrfRequestAttributeName(null);
 
