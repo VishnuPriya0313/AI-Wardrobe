@@ -74,10 +74,6 @@
     const matcherPanelRef = React.useRef(null);
     const removedWardrobeItemIdsRef = React.useRef(new Set());
     const syncingWardrobeItemIdsRef = React.useRef(new Set());
-    const deferredInstallPromptRef = React.useRef(null);
-    const [isAppInstallable, setIsAppInstallable] = React.useState(false);
-    const [isStandaloneApp, setIsStandaloneApp] = React.useState(false);
-    const [isIosInstallHintVisible, setIsIosInstallHintVisible] = React.useState(false);
     const [isProfileOpen, setIsProfileOpen] = React.useState(false);
     const [accountProfile, setAccountProfile] = React.useState(null);
     const [profileState, setProfileState] = React.useState({ loading: false, error: "" });
@@ -99,50 +95,6 @@
         .finally(() => setIsCheckingSession(false));
     }, []);
 
-    React.useEffect(() => {
-      const standaloneQuery = window.matchMedia("(display-mode: standalone)");
-      const isRunningStandalone = standaloneQuery.matches || window.navigator.standalone === true;
-      setIsStandaloneApp(isRunningStandalone);
-
-      function handleBeforeInstallPrompt(event) {
-        event.preventDefault();
-        deferredInstallPromptRef.current = event;
-        setIsAppInstallable(true);
-      }
-
-      function handleAppInstalled() {
-        deferredInstallPromptRef.current = null;
-        setIsAppInstallable(false);
-        setIsStandaloneApp(true);
-      }
-
-      window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
-      window.addEventListener("appinstalled", handleAppInstalled);
-
-      const isIos = /iphone|ipad|ipod/i.test(window.navigator.userAgent);
-      if (isIos && !isRunningStandalone && !localStorage.getItem("ai-wardrobe-ios-install-hint-dismissed")) {
-        setIsIosInstallHintVisible(true);
-      }
-
-      return () => {
-        window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
-        window.removeEventListener("appinstalled", handleAppInstalled);
-      };
-    }, []);
-
-    async function handleInstallAppClick() {
-      const deferredPrompt = deferredInstallPromptRef.current;
-      if (!deferredPrompt) return;
-      deferredPrompt.prompt();
-      await deferredPrompt.userChoice.catch(() => {});
-      deferredInstallPromptRef.current = null;
-      setIsAppInstallable(false);
-    }
-
-    function dismissIosInstallHint() {
-      localStorage.setItem("ai-wardrobe-ios-install-hint-dismissed", "1");
-      setIsIosInstallHintVisible(false);
-    }
 
     React.useEffect(() => {
       document.documentElement.setAttribute("data-theme", isDarkMode ? "dark" : "light");
@@ -729,14 +681,6 @@
             createElement("span", { className: "account-avatar", "aria-hidden": "true" }, currentUser.username.slice(0, 1).toUpperCase()),
             createElement("span", { className: "account-label" }, currentUser.username)
           ),
-          isAppInstallable && !isStandaloneApp
-            ? createElement("button", {
-                className: "install-app-button",
-                onClick: handleInstallAppClick,
-                type: "button",
-                title: "Install AI Wardrobe as an app"
-              }, "Install App")
-            : null,
           createElement("button", {
             className: "theme-toggle",
             onClick: () => setIsDarkMode(d => !d),
@@ -747,17 +691,6 @@
           createElement("button", { className: "logout-button", onClick: logout, type: "button", "aria-label": "Log out" }, "Log out")
         )
       ),
-      isIosInstallHintVisible
-        ? createElement("div", { className: "ios-install-hint", role: "status" },
-            createElement("span", null, "Install this app: tap Share, then \"Add to Home Screen\"."),
-            createElement("button", {
-              className: "icon-button",
-              onClick: dismissIosInstallHint,
-              type: "button",
-              title: "Dismiss"
-            }, "x")
-          )
-        : null,
       appState.text
         ? createElement("div", {
             className: `app-notice ${appState.tone}`,
@@ -772,6 +705,37 @@
         : null,
       createElement("main", { className: "shell", "data-view": activeAppView },
         createElement("aside", { className: "left-rail" },
+            createElement("nav", {
+                  className: "desktop-sidebar",
+                  "aria-label": "Desktop navigation"
+                },
+                createElement("button", {
+                      type: "button",
+                      className: activeAppView === "wardrobe" ? "active" : "",
+                      onClick: () => setActiveAppView("wardrobe")
+                    },
+                    createElement("span", { "aria-hidden": "true" }, "⌂"),
+                    createElement("strong", null, "My Wardrobe")
+                ),
+
+                createElement("button", {
+                      type: "button",
+                      className: activeAppView === "add" ? "active" : "",
+                      onClick: () => setActiveAppView("add")
+                    },
+                    createElement("span", { "aria-hidden": "true" }, "+"),
+                    createElement("strong", null, "Add Item")
+                ),
+
+                createElement("button", {
+                      type: "button",
+                      className: activeAppView === "match" ? "active" : "",
+                      onClick: () => setActiveAppView("match")
+                    },
+                    createElement("span", { "aria-hidden": "true" }, "✦"),
+                    createElement("strong", null, "Outfit Match")
+                )
+            ),
           createElement("section", { className: "panel upload-box app-screen add-screen" },
             createElement("div", null,
               createElement("h2", null, editingWardrobeItemId ? "Edit item" : "Add item")

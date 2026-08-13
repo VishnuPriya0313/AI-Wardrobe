@@ -5,10 +5,10 @@
   "scripts": {
     "start:database": "docker compose up -d --wait postgres",
     "stop:database": "docker compose stop postgres",
-    "start:backend": "node ./scripts/start-backend.js",
-    "start:frontend": "node ./scripts/start-frontend.js",
-    "check:backend": "node ./scripts/start-backend.js test",
-    "check:r2": "node ./scripts/start-backend.js -Dtest=R2ConnectivityCheckTest -Dr2.check=true test",
+    "start:backend": "node ./backend/scripts/start-backend.js",
+    "start:frontend": "node ./frontend/scripts/start-frontend.js",
+    "check:backend": "node ./backend/scripts/start-backend.js test",
+    "check:r2": "node ./backend/scripts/start-backend.js -Dtest=R2ConnectivityCheckTest -Dr2.check=true test",
     "check:frontend": "node --check frontend/wardrobe-studio.js"
   }
 }
